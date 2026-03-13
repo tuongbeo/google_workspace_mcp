@@ -235,3 +235,48 @@ export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Batch share results:\n${results.join("\n")}` }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerDriveExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("get_drive_file_download_url", "Get a direct download URL for a Drive file and optionally export Google native files.", {
+    file_id: z.string(),
+    export_mime_type: z.string().optional().describe("For Google native files: export MIME type, e.g. 'application/pdf', 'text/plain', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'"),
+  }, async ({ file_id, export_mime_type }) => {
+    const { accessToken } = await getCreds();
+    const meta = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType,size,webContentLink,webViewLink`) as any;
+    const lines = [`File: ${meta.name}`, `Type: ${meta.mimeType}`];
+    if (meta.webContentLink) lines.push(`Direct download: ${meta.webContentLink}`);
+    if (meta.webViewLink) lines.push(`View link: ${meta.webViewLink}`);
+    if (meta.mimeType?.startsWith("application/vnd.google-apps.") || export_mime_type) {
+      const mime = export_mime_type || "application/pdf";
+      const exportUrl = `https://www.googleapis.com/drive/v3/files/${file_id}/export?mimeType=${encodeURIComponent(mime)}`;
+      lines.push(`Export as ${mime}:\n${exportUrl}`);
+      lines.push("(Requires Authorization header — use with Bearer token)");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  server.tool("check_drive_file_public_access", "Check the public sharing status of a Drive file.", {
+    file_id: z.string(),
+  }, async ({ file_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await driveRequest(accessToken, `/files/${file_id}/permissions?fields=permissions(id,role,type,emailAddress,displayName)`) as any;
+    const perms = data.permissions || [];
+    const publicPerm = perms.find((p: any) => p.type === "anyone");
+    const domainPerm = perms.find((p: any) => p.type === "domain");
+    const lines = [`File: ${file_id}`, ""];
+    if (publicPerm) {
+      lines.push(`✅ PUBLIC ACCESS: Anyone can ${publicPerm.role}`);
+      lines.push(`Permission ID: ${publicPerm.id}`);
+    } else if (domainPerm) {
+      lines.push(`🔶 DOMAIN ACCESS: Domain members can ${domainPerm.role}`);
+    } else {
+      lines.push("🔒 PRIVATE: No public or domain access");
+    }
+    lines.push(`\nTotal permissions: ${perms.length}`);
+    const named = perms.filter((p: any) => p.type === "user" || p.type === "group");
+    if (named.length) lines.push(`Named users/groups: ${named.map((p: any) => `${p.emailAddress || p.displayName} (${p.role})`).join(", ")}`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+}

@@ -320,3 +320,86 @@ export function registerFormsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  // Slides extras
+  server.tool("get_slide_page", "Get detailed information about a specific slide in a presentation.", {
+    presentation_id: z.string(),
+    page_object_id: z.string().describe("Page/slide object ID (from get_presentation)"),
+  }, async ({ presentation_id, page_object_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await googleFetch(`https://slides.googleapis.com/v1/presentations/${presentation_id}/pages/${page_object_id}`, accessToken) as any;
+    const texts = (data.pageElements || []).flatMap((el: any) => el.shape?.text?.textElements || []).map((te: any) => te.textRun?.content || "").join("").trim();
+    const lines = [`Page: ${page_object_id}`, `Type: ${data.pageType || "SLIDE"}`, `Elements: ${data.pageElements?.length || 0}`, "", "Content:", texts || "(no text)"];
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  server.tool("get_slide_thumbnail", "Generate a thumbnail image URL for a specific slide.", {
+    presentation_id: z.string(),
+    page_object_id: z.string().describe("Page/slide object ID"),
+    thumbnail_size: z.enum(["LARGE", "MEDIUM", "SMALL"]).optional().default("MEDIUM"),
+  }, async ({ presentation_id, page_object_id, thumbnail_size = "MEDIUM" }) => {
+    const { accessToken } = await getCreds();
+    const params = new URLSearchParams({ "thumbnailProperties.thumbnailSize": thumbnail_size });
+    const data = await googleFetch(`https://slides.googleapis.com/v1/presentations/${presentation_id}/pages/${page_object_id}/thumbnail?${params}`, accessToken) as any;
+    return { content: [{ type: "text", text: `Thumbnail URL (${thumbnail_size}):\n${data.contentUrl}\n\nDimensions: ${data.width}×${data.height}` }] };
+  });
+
+  // Chat extras
+  server.tool("create_chat_reaction", "Add an emoji reaction to a Google Chat message.", {
+    message_name: z.string().describe("Message name in format 'spaces/{space}/messages/{message}'"),
+    emoji: z.string().describe("Unicode emoji character, e.g. '👍' or '🎉'"),
+  }, async ({ message_name, emoji }) => {
+    const { accessToken } = await getCreds();
+    const result = await googleFetch(`https://chat.googleapis.com/v1/${message_name}/reactions`, accessToken, "POST", {
+      emoji: { unicode: emoji }
+    }) as any;
+    return { content: [{ type: "text", text: `Reaction ${emoji} added to message.\nReaction name: ${result.name}` }] };
+  });
+
+  server.tool("download_chat_attachment", "Get metadata and download info for a Google Chat message attachment.", {
+    attachment_name: z.string().describe("Attachment resource name, e.g. 'spaces/{space}/messages/{message}/attachments/{attachment}'"),
+  }, async ({ attachment_name }) => {
+    const { accessToken } = await getCreds();
+    const data = await googleFetch(`https://chat.googleapis.com/v1/${attachment_name}`, accessToken) as any;
+    const lines = [
+      `Attachment: ${data.name}`, `Filename: ${data.contentName || "N/A"}`,
+      `Type: ${data.contentType || "N/A"}`, `Size: ${data.attachmentDataRef?.resourceName || "N/A"}`,
+    ];
+    if (data.downloadUri) lines.push(`Download URL: ${data.downloadUri}`);
+    if (data.driveDataRef?.driveFileId) lines.push(`Drive File ID: ${data.driveDataRef.driveFileId}\nView: https://drive.google.com/file/d/${data.driveDataRef.driveFileId}/view`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  // Tasks extra
+  server.tool("get_task_list", "Get details of a specific Google Task list.", {
+    tasklist_id: z.string(),
+  }, async ({ tasklist_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken) as any;
+    return { content: [{ type: "text", text: `Task List: ${data.title}\nID: ${data.id}\nUpdated: ${data.updated || "N/A"}` }] };
+  });
+
+  // Forms extra
+  server.tool("set_form_publish_settings", "Configure publish settings for a Google Form (collecting emails, limiting responses, etc.).", {
+    form_id: z.string(),
+    collect_email: z.boolean().optional().describe("Require respondents to sign in with Google"),
+    limit_responses: z.boolean().optional().describe("Limit to one response per user"),
+    show_progress_bar: z.boolean().optional(),
+    shuffle_questions: z.boolean().optional(),
+    is_quiz: z.boolean().optional().describe("Set form as quiz mode"),
+  }, async ({ form_id, collect_email, limit_responses, show_progress_bar, shuffle_questions, is_quiz }) => {
+    const { accessToken } = await getCreds();
+    const settings: Record<string, unknown> = {};
+    const fields: string[] = [];
+    if (collect_email !== undefined) { settings.emailCollectionType = collect_email ? "VERIFIED" : "DO_NOT_COLLECT"; fields.push("emailCollectionType"); }
+    if (limit_responses !== undefined) { settings.limitOneResponsePerUser = limit_responses; fields.push("limitOneResponsePerUser"); }
+    if (show_progress_bar !== undefined) { settings.progressBar = { show_progress_bar }; fields.push("progressBar"); }
+    if (shuffle_questions !== undefined) { settings.shuffleQuestions = shuffle_questions; fields.push("shuffleQuestions"); }
+    const requests: any[] = [{ updateSettings: { settings: { quizSettings: is_quiz !== undefined ? { isQuiz: is_quiz } : undefined, ...settings }, updateMask: fields.join(",") } }];
+    const result = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}:batchUpdate`, accessToken, "POST", { requests }) as any;
+    return { content: [{ type: "text", text: `Form publish settings updated.\nApplied: ${fields.join(", ") || "quiz mode"}` }] };
+  });
+}

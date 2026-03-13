@@ -140,3 +140,61 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Formatting applied to range (rows ${start_row}-${end_row}, cols ${start_col}-${end_col}).` }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerSheetsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("manage_conditional_formatting", "Add, update, or delete conditional formatting rules in a Google Sheet.", {
+    spreadsheet_id: z.string(),
+    action: z.enum(["add", "delete"]),
+    sheet_id: z.number().describe("Sheet ID (from get_spreadsheet_info)"),
+    start_row: z.number().optional().default(0),
+    end_row: z.number().optional().default(100),
+    start_col: z.number().optional().default(0),
+    end_col: z.number().optional().default(10),
+    rule_type: z.enum(["BLANK", "NOT_BLANK", "TEXT_CONTAINS", "TEXT_EQ", "NUMBER_GREATER", "NUMBER_LESS", "NUMBER_BETWEEN", "CUSTOM_FORMULA"]).optional().default("BLANK"),
+    condition_value: z.string().optional().describe("Value for condition (e.g., text to match, number, or formula like '=A1>0')"),
+    bg_color_hex: z.string().optional().describe("Background color on match, e.g. '#FF0000'"),
+    text_color_hex: z.string().optional(),
+    bold: z.boolean().optional(),
+    rule_index: z.number().optional().describe("Rule index to delete (for delete action)"),
+  }, async ({ spreadsheet_id, action, sheet_id, start_row = 0, end_row = 100, start_col = 0, end_col = 10, rule_type = "BLANK", condition_value, bg_color_hex, text_color_hex, bold, rule_index }) => {
+    const { accessToken } = await getCreds();
+
+    function hexToRgb(hex: string) {
+      return { red: parseInt(hex.slice(1,3),16)/255, green: parseInt(hex.slice(3,5),16)/255, blue: parseInt(hex.slice(5,7),16)/255 };
+    }
+
+    if (action === "delete") {
+      await sheetsRequest(accessToken, spreadsheet_id, ":batchUpdate", "POST", {
+        requests: [{ deleteConditionalFormatRule: { sheetId: sheet_id, index: rule_index || 0 } }]
+      });
+      return { content: [{ type: "text", text: `Conditional formatting rule ${rule_index ?? 0} deleted from sheet ${sheet_id}.` }] };
+    }
+
+    const range = { sheetId: sheet_id, startRowIndex: start_row, endRowIndex: end_row, startColumnIndex: start_col, endColumnIndex: end_col };
+    const format: Record<string, unknown> = {};
+    if (bg_color_hex) format.backgroundColor = hexToRgb(bg_color_hex);
+    const textFmt: Record<string, unknown> = {};
+    if (text_color_hex) textFmt.foregroundColor = hexToRgb(text_color_hex);
+    if (bold !== undefined) textFmt.bold = bold;
+    if (Object.keys(textFmt).length) format.textFormat = textFmt;
+
+    const typeMap: Record<string, string> = {
+      BLANK: "BLANK", NOT_BLANK: "NOT_BLANK", TEXT_CONTAINS: "TEXT_CONTAINS", TEXT_EQ: "TEXT_EQ",
+      NUMBER_GREATER: "NUMBER_GREATER", NUMBER_LESS: "NUMBER_LESS", NUMBER_BETWEEN: "NUMBER_BETWEEN", CUSTOM_FORMULA: "CUSTOM_FORMULA",
+    };
+    const condition: Record<string, unknown> = { type: typeMap[rule_type] };
+    if (condition_value) condition.values = [{ userEnteredValue: condition_value }];
+
+    const rule: Record<string, unknown> = {
+      ranges: [range],
+      booleanRule: { condition, format },
+    };
+
+    await sheetsRequest(accessToken, spreadsheet_id, ":batchUpdate", "POST", {
+      requests: [{ addConditionalFormatRule: { rule, index: 0 } }]
+    });
+    return { content: [{ type: "text", text: `Conditional formatting rule added to sheet ${sheet_id} (rows ${start_row}-${end_row}, cols ${start_col}-${end_col}).` }] };
+  });
+}

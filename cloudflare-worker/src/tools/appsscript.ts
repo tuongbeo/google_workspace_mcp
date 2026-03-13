@@ -167,3 +167,63 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
     return { content: [{ type: "text", text: `Processes (${processes.length}):\n\n${lines.join("\n\n")}` }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerAppsScriptExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("create_script_version", "Create a versioned snapshot of a Google Apps Script project.", {
+    script_id: z.string(),
+    description: z.string().optional().describe("Version description"),
+  }, async ({ script_id, description }) => {
+    const { accessToken } = await getCreds();
+    const body: Record<string, unknown> = {};
+    if (description) body.description = description;
+    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions`, accessToken, "POST", body) as any;
+    return { content: [{ type: "text", text: `Version created.\nNumber: ${result.versionNumber}\nDescription: ${result.description || "N/A"}\nCreated: ${result.createTime}` }] };
+  });
+
+  server.tool("get_script_version", "Get details of a specific version of a Google Apps Script project.", {
+    script_id: z.string(),
+    version_number: z.number(),
+  }, async ({ script_id, version_number }) => {
+    const { accessToken } = await getCreds();
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions/${version_number}`, accessToken) as any;
+    return { content: [{ type: "text", text: `Version ${data.versionNumber}\nScript ID: ${data.scriptId}\nDescription: ${data.description || "N/A"}\nCreated: ${data.createTime}` }] };
+  });
+
+  server.tool("list_script_versions", "List all versions of a Google Apps Script project.", {
+    script_id: z.string(),
+    page_size: z.number().optional().default(20),
+  }, async ({ script_id, page_size = 20 }) => {
+    const { accessToken } = await getCreds();
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions?pageSize=${page_size}`, accessToken) as any;
+    const versions = data.versions || [];
+    if (!versions.length) return { content: [{ type: "text", text: "No versions found." }] };
+    const lines = versions.map((v: any) => `v${v.versionNumber}: ${v.description || "(no description)"} | ${v.createTime}`);
+    return { content: [{ type: "text", text: `Versions (${versions.length}):\n${lines.join("\n")}` }] };
+  });
+
+  server.tool("delete_script_project", "Delete a Google Apps Script project.", {
+    script_id: z.string().describe("Script project ID (Drive file ID)"),
+  }, async ({ script_id }) => {
+    const { accessToken } = await getCreds();
+    // Apps Script projects are Drive files — delete via Drive API
+    await googleFetch(`https://www.googleapis.com/drive/v3/files/${script_id}`, accessToken, "DELETE");
+    return { content: [{ type: "text", text: `Script project ${script_id} deleted (moved to Trash).` }] };
+  });
+
+  server.tool("get_script_metrics", "Get execution metrics for a Google Apps Script project.", {
+    script_id: z.string(),
+    metrics_granularity: z.enum(["UNSPECIFIED_GRANULARITY", "WEEKLY", "DAILY"]).optional().default("WEEKLY"),
+  }, async ({ script_id, metrics_granularity = "WEEKLY" }) => {
+    const { accessToken } = await getCreds();
+    const params = new URLSearchParams({ metricsGranularity: metrics_granularity });
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/metrics?${params}`, accessToken) as any;
+    const lines = [`Script Metrics (${metrics_granularity}):`, ""];
+    if (data.activeUsers) lines.push(`Active users: ${JSON.stringify(data.activeUsers)}`);
+    if (data.failedExecutions) lines.push(`Failed executions: ${JSON.stringify(data.failedExecutions)}`);
+    if (data.totalExecutions) lines.push(`Total executions: ${JSON.stringify(data.totalExecutions)}`);
+    if (!data.activeUsers && !data.totalExecutions) lines.push("No metrics data available.");
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+}

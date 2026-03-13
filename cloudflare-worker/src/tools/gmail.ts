@@ -192,3 +192,77 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Attachment size: ${data.size} bytes\nData (base64): ${(data.data || "").substring(0, 200)}...` }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("get_gmail_threads_content_batch", "Batch-retrieve full content of multiple Gmail threads.", {
+    thread_ids: z.array(z.string()).describe("List of thread IDs (max 10)"),
+  }, async ({ thread_ids }) => {
+    const { accessToken } = await getCreds();
+    const results: string[] = [];
+    for (const id of thread_ids.slice(0, 10)) {
+      try {
+        const data = await gmailRequest(accessToken, `/threads/${id}?format=full`) as any;
+        const messages = data.messages || [];
+        const summary = messages.map((msg: any) => {
+          const hdrs: Record<string, string> = {};
+          for (const h of msg.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
+          return `[${hdrs.date || "?"}] ${hdrs.from || "?"}: ${hdrs.subject || "(none)"}`;
+        }).join("\n");
+        results.push(`=== Thread ${id} (${messages.length} msgs) ===\n${summary}`);
+      } catch (e) { results.push(`=== Thread ${id} === ERROR: ${e}`); }
+    }
+    return { content: [{ type: "text", text: results.join("\n\n") }] };
+  });
+
+  server.tool("list_gmail_filters", "List all Gmail filters configured for the account.", {}, async () => {
+    const { accessToken } = await getCreds();
+    const data = await gmailRequest(accessToken, "/settings/filters") as any;
+    const filters = data.filter || [];
+    if (!filters.length) return { content: [{ type: "text", text: "No filters configured." }] };
+    const lines = filters.map((f: any) => {
+      const criteria = f.criteria || {};
+      const action = f.action || {};
+      const c = [criteria.from && `from:${criteria.from}`, criteria.to && `to:${criteria.to}`, criteria.subject && `subject:${criteria.subject}`, criteria.query].filter(Boolean).join(", ");
+      const a = [action.addLabelIds?.join(","), action.removeLabelIds?.length && `remove:${action.removeLabelIds.join(",")}`, action.forward && `fwd:${action.forward}`].filter(Boolean).join(", ");
+      return `ID: ${f.id}\n  Match: ${c || "(any)"}\n  Action: ${a || "(none)"}`;
+    });
+    return { content: [{ type: "text", text: `Gmail Filters (${filters.length}):\n\n${lines.join("\n\n")}` }] };
+  });
+
+  server.tool("manage_gmail_filter", "Create or delete a Gmail filter.", {
+    action: z.enum(["create", "delete"]),
+    filter_id: z.string().optional().describe("Required for delete"),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    subject: z.string().optional(),
+    query: z.string().optional().describe("Advanced Gmail search query"),
+    add_label_ids: z.array(z.string()).optional(),
+    remove_label_ids: z.array(z.string()).optional(),
+    forward_to: z.string().optional(),
+    mark_as_read: z.boolean().optional(),
+    archive: z.boolean().optional(),
+  }, async ({ action, filter_id, from, to, subject, query, add_label_ids, remove_label_ids, forward_to, mark_as_read, archive }) => {
+    const { accessToken } = await getCreds();
+    if (action === "delete") {
+      await gmailRequest(accessToken, `/settings/filters/${filter_id}`, "DELETE");
+      return { content: [{ type: "text", text: `Filter ${filter_id} deleted.` }] };
+    }
+    const criteria: Record<string, string> = {};
+    if (from) criteria.from = from;
+    if (to) criteria.to = to;
+    if (subject) criteria.subject = subject;
+    if (query) criteria.query = query;
+    const actionObj: Record<string, unknown> = {};
+    const addLabels = [...(add_label_ids || [])];
+    const removeLabels = [...(remove_label_ids || [])];
+    if (mark_as_read) removeLabels.push("UNREAD");
+    if (archive) removeLabels.push("INBOX");
+    if (addLabels.length) actionObj.addLabelIds = addLabels;
+    if (removeLabels.length) actionObj.removeLabelIds = removeLabels;
+    if (forward_to) actionObj.forward = forward_to;
+    const result = await gmailRequest(accessToken, "/settings/filters", "POST", { criteria, action: actionObj }) as any;
+    return { content: [{ type: "text", text: `Filter created. ID: ${result.id}` }] };
+  });
+}

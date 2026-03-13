@@ -215,3 +215,176 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Reply added. Reply ID: ${result.id}${resolve ? " | Comment resolved." : ""}` }] };
   });
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("search_docs", "Search Google Docs by name in Drive.", {
+    query: z.string().describe("Text to search in document names"),
+    max_results: z.number().optional().default(10),
+    folder_id: z.string().optional().describe("Limit search to a specific folder"),
+  }, async ({ query, max_results = 10, folder_id }) => {
+    const { accessToken } = await getCreds();
+    let q = `mimeType='application/vnd.google-apps.document' and name contains '${query.replace(/'/g, "\\'")}' and trashed=false`;
+    if (folder_id) q += ` and '${folder_id}' in parents`;
+    const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const files = data.files || [];
+    if (!files.length) return { content: [{ type: "text", text: `No docs found for: "${query}"` }] };
+    const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
+    return { content: [{ type: "text", text: `Found ${files.length} docs:\n\n${lines.join("\n\n")}` }] };
+  });
+
+  server.tool("list_docs_in_folder", "List Google Docs in a specific Drive folder.", {
+    folder_id: z.string().describe("Drive folder ID"),
+    max_results: z.number().optional().default(20),
+  }, async ({ folder_id, max_results = 20 }) => {
+    const { accessToken } = await getCreds();
+    const q = `mimeType='application/vnd.google-apps.document' and '${folder_id}' in parents and trashed=false`;
+    const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const files = data.files || [];
+    if (!files.length) return { content: [{ type: "text", text: "No docs in this folder." }] };
+    const lines = files.map((f: any) => `📄 ${f.name} | ID: ${f.id} | ${f.modifiedTime}`);
+    return { content: [{ type: "text", text: `Docs in folder (${files.length}):\n${lines.join("\n")}` }] };
+  });
+
+  server.tool("update_doc_headers_footers", "Update the header or footer of a Google Doc.", {
+    document_id: z.string(),
+    text: z.string().describe("New text content for the header/footer"),
+    target: z.enum(["header", "footer"]).default("header"),
+    section_type: z.enum(["DEFAULT", "FIRST_PAGE", "EVEN_PAGE"]).optional().default("DEFAULT"),
+  }, async ({ document_id, text, target = "header", section_type = "DEFAULT" }) => {
+    const { accessToken } = await getCreds();
+    const doc = await docsRequest(accessToken, document_id) as any;
+    const sections = doc.documentStyle?.defaultHeaderId ? doc : null;
+    const headerId = target === "header" ? doc.documentStyle?.defaultHeaderId : doc.documentStyle?.defaultFooterId;
+    if (!headerId) {
+      // Create header/footer first via batchUpdate
+      const createReq: Record<string, unknown> = target === "header"
+        ? { createHeader: { type: section_type } }
+        : { createFooter: { type: section_type } };
+      const createResult = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: [createReq] }) as any;
+      const newId = target === "header"
+        ? createResult.replies?.[0]?.createHeader?.headerId
+        : createResult.replies?.[0]?.createFooter?.footerId;
+      if (newId) {
+        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+          requests: [{ insertText: { location: { segmentId: newId, index: 0 }, text } }]
+        });
+        return { content: [{ type: "text", text: `${target} created and set to: "${text}"` }] };
+      }
+      return { content: [{ type: "text", text: `Could not create ${target}.` }] };
+    }
+    // Clear existing and insert new text
+    const headerDoc = await docsRequest(accessToken, `${document_id}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as any;
+    const segment = target === "header" ? headerDoc.headers?.[headerId] : headerDoc.footers?.[headerId];
+    const endIndex = segment?.content?.slice(-1)[0]?.endIndex ?? 1;
+    const requests: any[] = [];
+    if (endIndex > 1) requests.push({ deleteContentRange: { range: { segmentId: headerId, startIndex: 0, endIndex: endIndex - 1 } } });
+    requests.push({ insertText: { location: { segmentId: headerId, index: 0 }, text } });
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+    return { content: [{ type: "text", text: `${target} updated to: "${text}"` }] };
+  });
+
+  server.tool("create_table_with_data", "Create a table populated with data in a Google Doc.", {
+    document_id: z.string(),
+    data: z.array(z.array(z.string())).describe("2D array — first row is headers, subsequent rows are data"),
+    insertion_index: z.number().optional().default(1).describe("Index where table is inserted"),
+  }, async ({ document_id, data, insertion_index = 1 }) => {
+    const { accessToken } = await getCreds();
+    if (!data.length || !data[0].length) return { content: [{ type: "text", text: "No data provided." }] };
+    const rows = data.length;
+    const cols = data[0].length;
+    // Insert empty table
+    const createResult = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      requests: [{ insertTable: { rows, columns: cols, location: { index: insertion_index } } }]
+    }) as any;
+    // Re-fetch doc to get table structure and cell indices
+    const doc = await docsRequest(accessToken, document_id) as any;
+    // Find the newly inserted table
+    const tableElem = doc.body?.content?.find((e: any) => e.table && e.table.rows === rows && e.table.columns === cols);
+    if (!tableElem) return { content: [{ type: "text", text: `Table created (${rows}×${cols}) but could not fill cells — do it manually via batch_update_doc.` }] };
+    const insertRequests: any[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const cell = tableElem.table.tableRows[r]?.tableCells[c];
+        const cellIndex = cell?.content?.[0]?.startIndex;
+        if (cellIndex !== undefined && data[r][c]) {
+          insertRequests.push({ insertText: { location: { index: cellIndex }, text: data[r][c] } });
+        }
+      }
+    }
+    if (insertRequests.length) {
+      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: insertRequests });
+    }
+    return { content: [{ type: "text", text: `Table ${rows}×${cols} created and filled with ${insertRequests.length} cells.` }] };
+  });
+
+  server.tool("debug_table_structure", "Debug: get detailed structure of tables in a Google Doc (indices, rows, cells).", {
+    document_id: z.string(),
+    max_tables: z.number().optional().default(3),
+  }, async ({ document_id, max_tables = 3 }) => {
+    const { accessToken } = await getCreds();
+    const doc = await docsRequest(accessToken, document_id) as any;
+    const tables = (doc.body?.content || []).filter((e: any) => e.table);
+    const lines = [`Doc: ${doc.title}`, `Tables found: ${tables.length}`, ""];
+    for (const [ti, tableElem] of tables.slice(0, max_tables).entries()) {
+      const t = tableElem.table;
+      lines.push(`=== Table ${ti + 1} [${tableElem.startIndex}-${tableElem.endIndex}] (${t.rows}r × ${t.columns}c) ===`);
+      for (const [ri, row] of (t.tableRows || []).entries()) {
+        for (const [ci, cell] of (row.tableCells || []).entries()) {
+          const text = (cell.content || []).flatMap((e: any) => e.paragraph?.elements || []).map((e: any) => e.textRun?.content || "").join("").trim().substring(0, 40);
+          const contentIndex = cell.content?.[0]?.startIndex;
+          lines.push(`  [r${ri}c${ci}] startIndex:${cell.startIndex} contentIndex:${contentIndex} text:"${text}"`);
+        }
+      }
+      lines.push("");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  server.tool("insert_doc_tab", "Insert a new tab in a Google Doc (Docs tabs feature).", {
+    document_id: z.string(),
+    title: z.string().describe("Tab title"),
+    parent_tab_id: z.string().optional().describe("Parent tab ID for nested tabs"),
+    insertion_index: z.number().optional().describe("Position (0-based)"),
+  }, async ({ document_id, title, parent_tab_id, insertion_index }) => {
+    const { accessToken } = await getCreds();
+    const tabProperties: Record<string, unknown> = { title };
+    const req: Record<string, unknown> = { tabProperties };
+    if (parent_tab_id) req.parentTabId = parent_tab_id;
+    if (insertion_index !== undefined) req.insertionIndex = insertion_index;
+    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      requests: [{ insertTab: req }]
+    }) as any;
+    const newTabId = result.replies?.[0]?.insertTab?.tabId;
+    return { content: [{ type: "text", text: `Tab "${title}" created.${newTabId ? ` Tab ID: ${newTabId}` : ""}` }] };
+  });
+
+  server.tool("delete_doc_tab", "Delete a tab from a Google Doc.", {
+    document_id: z.string(),
+    tab_id: z.string().describe("Tab ID to delete"),
+  }, async ({ document_id, tab_id }) => {
+    const { accessToken } = await getCreds();
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      requests: [{ deleteTab: { tabId: tab_id } }]
+    });
+    return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
+  });
+
+  server.tool("update_doc_tab", "Update properties of a Google Doc tab (title, nesting).", {
+    document_id: z.string(),
+    tab_id: z.string(),
+    title: z.string().optional(),
+  }, async ({ document_id, tab_id, title }) => {
+    const { accessToken } = await getCreds();
+    const tabProperties: Record<string, unknown> = {};
+    const fields: string[] = [];
+    if (title) { tabProperties.title = title; fields.push("title"); }
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      requests: [{ updateTabProperties: { tabId: tab_id, tabProperties, fields: fields.join(",") } }]
+    });
+    return { content: [{ type: "text", text: `Tab ${tab_id} updated.` }] };
+  });
+}

@@ -1,23 +1,24 @@
 /**
- * MCP Server handler — Google Workspace (Full tool coverage)
+ * MCP Server handler — Google Workspace (Full tool coverage v2)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Env } from "./types";
 import { extractSub, getValidAccessToken } from "./jwt";
-import { registerGmailTools } from "./tools/gmail";
+import { registerGmailTools, registerGmailExtraTools } from "./tools/gmail";
 import { registerCalendarTools } from "./tools/calendar";
-import { registerDriveTools } from "./tools/drive";
-import { registerDocsTools } from "./tools/docs";
-import { registerSheetsTools } from "./tools/sheets";
-import { registerContactsTools } from "./tools/contacts";
-import { registerAppsScriptTools } from "./tools/appsscript";
+import { registerDriveTools, registerDriveExtraTools } from "./tools/drive";
+import { registerDocsTools, registerDocsExtraTools } from "./tools/docs";
+import { registerSheetsTools, registerSheetsExtraTools } from "./tools/sheets";
+import { registerContactsTools, registerContactsExtraTools } from "./tools/contacts";
+import { registerAppsScriptTools, registerAppsScriptExtraTools } from "./tools/appsscript";
 import { registerSearchTools } from "./tools/search";
 import {
   registerSlidesTools,
   registerChatTools,
   registerTasksTools,
   registerFormsTools,
+  registerWorkspaceExtraTools,
 } from "./tools/workspace";
 
 function unauthorizedResponse(publicBaseUrl: string): Response {
@@ -51,23 +52,30 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
     return unauthorizedResponse(env.PUBLIC_BASE_URL);
   }
 
-  const server = new McpServer({ name: "mcp-google-workspace", version: "2.0.0" });
+  const server = new McpServer({ name: "mcp-google-workspace", version: "2.1.0" });
   const getCreds = async () => ({ accessToken });
 
-  // ── Register all tools ────────────────────────────────────────────────────────
-  registerGmailTools(server, getCreds);        // Gmail: 10 tools
-  registerCalendarTools(server, getCreds);     // Calendar: 8 tools
-  registerDriveTools(server, getCreds);        // Drive: 14 tools
-  registerDocsTools(server, getCreds);         // Docs: 12 tools
-  registerSheetsTools(server, getCreds);       // Sheets: 8 tools
-  registerSlidesTools(server, getCreds);       // Slides: 5 tools
-  registerChatTools(server, getCreds);         // Chat: 4 tools
-  registerTasksTools(server, getCreds);        // Tasks: 9 tools
-  registerFormsTools(server, getCreds);        // Forms: 5 tools
-  registerContactsTools(server, getCreds);     // Contacts: 12 tools
-  registerAppsScriptTools(server, getCreds);   // Apps Script: 11 tools
-  registerSearchTools(server, getCreds, env);  // Custom Search: 3 tools
-  // ─────────────────────────────────────────────────────── Total: ~101 tools ──
+  // ── Core tools ────────────────────────────────────────────────────────────────
+  registerGmailTools(server, getCreds);         // 11 tools
+  registerGmailExtraTools(server, getCreds);    // +3 tools (threads batch, filters)
+  registerCalendarTools(server, getCreds);      // 8 tools
+  registerDriveTools(server, getCreds);         // 15 tools
+  registerDriveExtraTools(server, getCreds);    // +2 tools (download URL, public access)
+  registerDocsTools(server, getCreds);          // 13 tools
+  registerDocsExtraTools(server, getCreds);     // +8 tools (search, tabs, table, headers)
+  registerSheetsTools(server, getCreds);        // 8 tools
+  registerSheetsExtraTools(server, getCreds);   // +1 tool (conditional formatting)
+  registerSlidesTools(server, getCreds);        // 5 tools
+  registerChatTools(server, getCreds);          // 4 tools
+  registerTasksTools(server, getCreds);         // 9 tools
+  registerFormsTools(server, getCreds);         // 5 tools
+  registerContactsTools(server, getCreds);      // 11 tools
+  registerContactsExtraTools(server, getCreds); // +1 tool (batch)
+  registerAppsScriptTools(server, getCreds);    // 11 tools
+  registerAppsScriptExtraTools(server, getCreds); // +5 tools (versions, delete, metrics)
+  registerSearchTools(server, getCreds, env);   // 3 tools
+  registerWorkspaceExtraTools(server, getCreds); // +6 tools (slides page/thumb, chat reaction/attach, task list, form settings)
+  // ─────────────────────────────────────────────────────── Total: ~130 tools ──
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

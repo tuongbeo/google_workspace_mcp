@@ -174,3 +174,62 @@ function formatContact(c: any): string {
   if (c.biographies?.length) lines.push(`Notes: ${c.biographies[0].value?.substring(0, 100)}`);
   return lines.join("\n");
 }
+
+// ─── Additional tools to match upstream ──────────────────────────────────────
+
+export function registerContactsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool("manage_contacts_batch", "Batch create, update, or delete multiple contacts at once.", {
+    action: z.enum(["create", "update", "delete"]),
+    contacts: z.array(z.object({
+      resource_name: z.string().optional().describe("Required for update/delete"),
+      first_name: z.string().optional(),
+      last_name: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
+      company: z.string().optional(),
+    })).describe("List of contacts to process (max 50)"),
+  }, async ({ action, contacts }) => {
+    const { accessToken } = await getCreds();
+    const results: string[] = [];
+
+    if (action === "create") {
+      const contacts_body = contacts.slice(0, 50).map(c => {
+        const person: Record<string, unknown> = { names: [{ givenName: c.first_name || "", familyName: c.last_name || "" }] };
+        if (c.email) person.emailAddresses = [{ value: c.email }];
+        if (c.phone) person.phoneNumbers = [{ value: c.phone }];
+        if (c.company) person.organizations = [{ name: c.company }];
+        return person;
+      });
+      const data = await googleFetch(`${PEOPLE_BASE}/people:batchCreateContacts`, accessToken, "POST", { contacts: contacts_body.map(p => ({ contactPerson: p })), readMask: "names" }) as any;
+      const created = data.createdPeople || [];
+      results.push(`Created ${created.length} contacts`);
+      created.forEach((p: any) => results.push(`  + ${p.person?.names?.[0]?.displayName} (${p.person?.resourceName})`));
+    } else if (action === "update") {
+      for (const c of contacts.slice(0, 50)) {
+        if (!c.resource_name) { results.push(`  ✗ Missing resource_name`); continue; }
+        try {
+          const existing = await googleFetch(`${PEOPLE_BASE}/${c.resource_name}?personFields=names,emailAddresses,phoneNumbers,organizations`, accessToken) as any;
+          const body: Record<string, unknown> = { etag: existing.etag };
+          const fields: string[] = [];
+          if (c.first_name !== undefined || c.last_name !== undefined) {
+            const n = existing.names?.[0] || {};
+            body.names = [{ ...n, givenName: c.first_name ?? n.givenName, familyName: c.last_name ?? n.familyName }];
+            fields.push("names");
+          }
+          if (c.email) { body.emailAddresses = [{ value: c.email }]; fields.push("emailAddresses"); }
+          if (c.phone) { body.phoneNumbers = [{ value: c.phone }]; fields.push("phoneNumbers"); }
+          if (c.company) { body.organizations = [{ name: c.company }]; fields.push("organizations"); }
+          await googleFetch(`${PEOPLE_BASE}/${c.resource_name}:updateContact?updatePersonFields=${fields.join(",")}`, accessToken, "PATCH", body);
+          results.push(`  ✓ Updated ${c.resource_name}`);
+        } catch (e) { results.push(`  ✗ ${c.resource_name}: ${e}`); }
+      }
+    } else if (action === "delete") {
+      const resourceNames = contacts.slice(0, 50).filter(c => c.resource_name).map(c => c.resource_name!);
+      if (!resourceNames.length) return { content: [{ type: "text", text: "No valid resource_names provided." }] };
+      await googleFetch(`${PEOPLE_BASE}/people:batchDeleteContacts`, accessToken, "POST", { resourceNames });
+      results.push(`Deleted ${resourceNames.length} contacts`);
+    }
+
+    return { content: [{ type: "text", text: `Batch ${action} results:\n${results.join("\n")}` }] };
+  });
+}
