@@ -1,0 +1,15 @@
+{
+  "name": "googleworkspace",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // KV namespace lưu OAuth state, auth codes, tokens
+  // ID: 2750f90f2d6945729e4f4304017b6506
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "2750f90f2d6945729e4f4304017b6506"
+    }
+  ]
+}

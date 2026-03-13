@@ -1,0 +1,194 @@
+/**
+ * Gmail MCP Tools — Full implementation (mirrors taylorwilsdon upstream)
+ */
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { gmailRequest } from "../google";
+
+type GetCredsFunc = () => Promise<{ accessToken: string }>;
+
+function decodeBase64Url(str: string): string {
+  try { return atob(str.replace(/-/g, "+").replace(/_/g, "/")); } catch { return ""; }
+}
+
+function extractBody(payload: any): string {
+  if (payload?.body?.data) return decodeBase64Url(payload.body.data);
+  for (const part of payload?.parts || []) {
+    if (part.mimeType === "text/plain" && part.body?.data) return decodeBase64Url(part.body.data);
+  }
+  for (const part of payload?.parts || []) {
+    const r = extractBody(part); if (r) return r;
+  }
+  return "";
+}
+
+function encodeEmail(headers: string, body: string): string {
+  const raw = headers + "\r\n" + body;
+  return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
+
+  server.tool("search_gmail_messages", "Search Gmail messages using Gmail query syntax.", {
+    query: z.string().describe("Gmail query, e.g. 'from:boss@company.com is:unread'"),
+    page_size: z.number().optional().default(10),
+    page_token: z.string().optional(),
+  }, async ({ query, page_size = 10, page_token }) => {
+    const { accessToken } = await getCreds();
+    const params = new URLSearchParams({ q: query, maxResults: String(Math.min(page_size, 50)) });
+    if (page_token) params.set("pageToken", page_token);
+    const data = await gmailRequest(accessToken, `/messages?${params}`) as any;
+    const messages = data.messages || [];
+    if (!messages.length) return { content: [{ type: "text", text: `No messages for: "${query}"` }] };
+    const lines = [`Found ${messages.length} messages:`, ""];
+    for (const m of messages) lines.push(`ID: ${m.id} | Thread: ${m.threadId} | https://mail.google.com/mail/u/0/#all/${m.id}`);
+    if (data.nextPageToken) lines.push(`\nNext page token: ${data.nextPageToken}`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  server.tool("get_gmail_message_content", "Get full content of a Gmail message by ID.", {
+    message_id: z.string(),
+  }, async ({ message_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await gmailRequest(accessToken, `/messages/${message_id}?format=full`) as any;
+    const hdrs: Record<string, string> = {};
+    for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
+    const body = extractBody(data.payload);
+    return { content: [{ type: "text", text: [`Subject: ${hdrs.subject || "(none)"}`, `From: ${hdrs.from || "?"}`, `To: ${hdrs.to || ""}`, `Date: ${hdrs.date || ""}`, `Labels: ${(data.labelIds || []).join(", ")}`, "", "--- BODY ---", body || "[No readable content]"].join("\n") }] };
+  });
+
+  server.tool("get_gmail_messages_content_batch", "Batch-retrieve full content of multiple Gmail messages.", {
+    message_ids: z.array(z.string()).describe("List of message IDs (max 20)"),
+  }, async ({ message_ids }) => {
+    const { accessToken } = await getCreds();
+    const results: string[] = [];
+    for (const id of message_ids.slice(0, 20)) {
+      try {
+        const data = await gmailRequest(accessToken, `/messages/${id}?format=full`) as any;
+        const hdrs: Record<string, string> = {};
+        for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
+        results.push(`=== Message ${id} ===\nSubject: ${hdrs.subject || "(none)"}\nFrom: ${hdrs.from || "?"}\nDate: ${hdrs.date || ""}\n${extractBody(data.payload).substring(0, 500)}`);
+      } catch (e) { results.push(`=== Message ${id} === ERROR: ${e}`); }
+    }
+    return { content: [{ type: "text", text: results.join("\n\n") }] };
+  });
+
+  server.tool("get_gmail_thread_content", "Get all messages in a Gmail thread.", {
+    thread_id: z.string(),
+  }, async ({ thread_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await gmailRequest(accessToken, `/threads/${thread_id}?format=full`) as any;
+    const messages = data.messages || [];
+    const lines = [`Thread ${thread_id} — ${messages.length} message(s)`, ""];
+    for (const msg of messages) {
+      const hdrs: Record<string, string> = {};
+      for (const h of msg.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
+      lines.push(`[${hdrs.date || "?"}] From: ${hdrs.from || "?"}`);
+      lines.push(`Subject: ${hdrs.subject || "(none)"}`);
+      const body = extractBody(msg.payload);
+      if (body) lines.push(body.substring(0, 300).trim());
+      lines.push("");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  server.tool("send_gmail_message", "Send an email using Gmail.", {
+    to: z.string(),
+    subject: z.string(),
+    body: z.string(),
+    cc: z.string().optional(),
+    bcc: z.string().optional(),
+    in_reply_to_message_id: z.string().optional(),
+    html: z.boolean().optional().default(false).describe("Set true to send HTML body"),
+  }, async ({ to, subject, body, cc, bcc, in_reply_to_message_id, html = false }) => {
+    const { accessToken } = await getCreds();
+    const contentType = html ? "text/html" : "text/plain";
+    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: ${contentType}; charset=utf-8`;
+    if (cc) headers += `\r\nCc: ${cc}`;
+    if (bcc) headers += `\r\nBcc: ${bcc}`;
+    if (in_reply_to_message_id) headers += `\r\nIn-Reply-To: <${in_reply_to_message_id}>`;
+    const payload: Record<string, unknown> = { raw: encodeEmail(headers, body) };
+    if (in_reply_to_message_id) {
+      const orig = await gmailRequest(accessToken, `/messages/${in_reply_to_message_id}?format=minimal`) as any;
+      if (orig?.threadId) payload.threadId = orig.threadId;
+    }
+    const result = await gmailRequest(accessToken, "/messages/send", "POST", payload) as any;
+    return { content: [{ type: "text", text: `Email sent! Message ID: ${result.id}` }] };
+  });
+
+  server.tool("create_gmail_draft", "Create a Gmail draft.", {
+    to: z.string(),
+    subject: z.string(),
+    body: z.string(),
+    cc: z.string().optional(),
+  }, async ({ to, subject, body, cc }) => {
+    const { accessToken } = await getCreds();
+    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8`;
+    if (cc) headers += `\r\nCc: ${cc}`;
+    const result = await gmailRequest(accessToken, "/drafts", "POST", { message: { raw: encodeEmail(headers, body) } }) as any;
+    return { content: [{ type: "text", text: `Draft created! Draft ID: ${result.id}` }] };
+  });
+
+  server.tool("list_gmail_labels", "List all Gmail labels.", {}, async () => {
+    const { accessToken } = await getCreds();
+    const data = await gmailRequest(accessToken, "/labels") as any;
+    const labels = (data.labels || []).map((l: any) => `- ${l.name} (ID: ${l.id}, type: ${l.type})`).join("\n");
+    return { content: [{ type: "text", text: `Gmail Labels:\n${labels}` }] };
+  });
+
+  server.tool("manage_gmail_label", "Create, update, or delete a Gmail label.", {
+    action: z.enum(["create", "update", "delete"]),
+    label_id: z.string().optional().describe("Required for update/delete"),
+    name: z.string().optional().describe("Label name (required for create/update)"),
+    message_list_visibility: z.enum(["show", "hide"]).optional(),
+    label_list_visibility: z.enum(["labelShow", "labelShowIfUnread", "labelHide"]).optional(),
+  }, async ({ action, label_id, name, message_list_visibility, label_list_visibility }) => {
+    const { accessToken } = await getCreds();
+    if (action === "create") {
+      const body: Record<string, unknown> = { name };
+      if (message_list_visibility) body.messageListVisibility = message_list_visibility;
+      if (label_list_visibility) body.labelListVisibility = label_list_visibility;
+      const result = await gmailRequest(accessToken, "/labels", "POST", body) as any;
+      return { content: [{ type: "text", text: `Label created: "${result.name}" (ID: ${result.id})` }] };
+    } else if (action === "update") {
+      const body: Record<string, unknown> = {};
+      if (name) body.name = name;
+      if (message_list_visibility) body.messageListVisibility = message_list_visibility;
+      if (label_list_visibility) body.labelListVisibility = label_list_visibility;
+      const result = await gmailRequest(accessToken, `/labels/${label_id}`, "PATCH", body) as any;
+      return { content: [{ type: "text", text: `Label updated: "${result.name}"` }] };
+    } else {
+      await gmailRequest(accessToken, `/labels/${label_id}`, "DELETE");
+      return { content: [{ type: "text", text: `Label ${label_id} deleted.` }] };
+    }
+  });
+
+  server.tool("modify_gmail_message", "Modify Gmail message labels (mark read, archive, trash, etc.).", {
+    message_id: z.string(),
+    add_labels: z.array(z.string()).optional(),
+    remove_labels: z.array(z.string()).optional(),
+  }, async ({ message_id, add_labels = [], remove_labels = [] }) => {
+    const { accessToken } = await getCreds();
+    await gmailRequest(accessToken, `/messages/${message_id}/modify`, "POST", { addLabelIds: add_labels, removeLabelIds: remove_labels });
+    return { content: [{ type: "text", text: `Message ${message_id} labels updated.` }] };
+  });
+
+  server.tool("batch_modify_gmail_message_labels", "Batch modify labels on multiple Gmail messages.", {
+    message_ids: z.array(z.string()),
+    add_labels: z.array(z.string()).optional(),
+    remove_labels: z.array(z.string()).optional(),
+  }, async ({ message_ids, add_labels = [], remove_labels = [] }) => {
+    const { accessToken } = await getCreds();
+    await gmailRequest(accessToken, "/messages/batchModify", "POST", { ids: message_ids, addLabelIds: add_labels, removeLabelIds: remove_labels });
+    return { content: [{ type: "text", text: `Batch modified ${message_ids.length} messages.` }] };
+  });
+
+  server.tool("get_gmail_attachment", "Download a Gmail message attachment (returns base64 content).", {
+    message_id: z.string(),
+    attachment_id: z.string(),
+  }, async ({ message_id, attachment_id }) => {
+    const { accessToken } = await getCreds();
+    const data = await gmailRequest(accessToken, `/messages/${message_id}/attachments/${attachment_id}`) as any;
+    return { content: [{ type: "text", text: `Attachment size: ${data.size} bytes\nData (base64): ${(data.data || "").substring(0, 200)}...` }] };
+  });
+}
