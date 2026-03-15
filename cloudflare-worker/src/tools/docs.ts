@@ -93,19 +93,33 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Doc created: "${doc.title}"\nID: ${doc.documentId}\nURL: https://docs.google.com/document/d/${doc.documentId}/edit` }] };
   });
 
-  server.tool("append_to_google_doc", "Append text to an existing Google Doc.", {
+  server.tool("append_to_google_doc", "Append text to an existing Google Doc. Supports multi-tab documents via tab_id.", {
     document_id: z.string(),
     text: z.string(),
-  }, async ({ document_id, text }) => {
+    tab_id: z.string().optional().describe(
+      "Tab ID to append into. If omitted, appends to the default tab (or the only tab for single-tab docs). " +
+      "Get tab IDs from get_doc_tabs."
+    ),
+  }, async ({ document_id, text, tab_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
-    const content = doc.body?.content || [];
-    const lastElem = content[content.length - 1];
-    const endIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
+
+    // endOfSegmentLocation is the correct, safe way to append content to any tab.
+    // It avoids the need to compute endIndex manually (which differs per-tab).
+    // Without tab_id → appends to default/first tab segment.
+    const endOfSegmentLocation: Record<string, unknown> = {};
+    if (tab_id) endOfSegmentLocation.tabId = tab_id;
+
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ insertText: { location: { index: endIndex }, text: "\n" + text } }],
+      requests: [{
+        insertText: {
+          endOfSegmentLocation,
+          text: "\n" + text,
+        }
+      }],
     });
-    return { content: [{ type: "text", text: `Text appended to ${document_id}.` }] };
+
+    const target = tab_id ? `tab ${tab_id}` : "default tab";
+    return { content: [{ type: "text", text: `Text appended to ${target} in document ${document_id}.` }] };
   });
 
   server.tool("modify_doc_text", "Replace text in a Google Doc (find and replace).", {
@@ -207,14 +221,40 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `PDF export ready. Size: ${sizeKb} KB\nDirect download: ${exportUrl}\n(Note: requires authentication — add ?access_token=... or use Drive export API)` }] };
   });
 
-  server.tool("inspect_doc_structure", "Inspect the structural elements of a Google Doc (indices, types).", {
+  server.tool("inspect_doc_structure", "Inspect the structural elements of a Google Doc (indices, types). Supports tab_id for multi-tab documents — each tab has its own independent index space starting at 1.", {
     document_id: z.string(),
-  }, async ({ document_id }) => {
+    tab_id: z.string().optional().describe("Tab ID to inspect. If omitted, inspects the default body. Get tab IDs from get_doc_tabs."),
+  }, async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
-    const lines = [`Doc: ${doc.title}`, ""];
+    const path = tab_id ? "?includeTabsContent=true" : "";
+    const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
+
+    let bodyContent: any[];
+    let contextLabel: string;
+
+    if (tab_id) {
+      function findTab(tabList: any[], id: string): any | null {
+        for (const tab of tabList) {
+          if (tab.tabProperties?.tabId === id) return tab;
+          if (tab.childTabs?.length) {
+            const found = findTab(tab.childTabs, id);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+      const tab = findTab(doc.tabs || [], tab_id);
+      if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list tabs.` }] };
+      bodyContent = tab.documentTab?.body?.content || [];
+      contextLabel = `Tab: ${tab.tabProperties?.title ?? tab_id} (index space is independent, starts at 1)`;
+    } else {
+      bodyContent = doc.body?.content || [];
+      contextLabel = "Default body";
+    }
+
+    const lines = [`Doc: ${doc.title}`, `Context: ${contextLabel}`, ""];
     let i = 0;
-    for (const elem of (doc.body?.content || []).slice(0, 30)) {
+    for (const elem of bodyContent.slice(0, 30)) {
       if (elem.paragraph) {
         const style = elem.paragraph.paragraphStyle?.namedStyleType || "NORMAL_TEXT";
         const text = (elem.paragraph.elements || []).map((e: any) => e.textRun?.content || "").join("").substring(0, 60).replace(/\n/g, "↵");
@@ -448,43 +488,75 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: `Tab ${tab_id} updated: ${updated}` }] };
   });
 
-  // ─── Tab: List all tabs with hierarchy ────────────────────────────────────────
+  // ── Content Isolation Model (Google Docs Tabs) ──────────────────────────────
+  // • Each tab owns an INDEPENDENT index space starting at 1.
+  //   Index 1 in Tab A is completely separate from Index 1 in Tab B.
+  // • insertText / insertPerson / deleteContentRange all require tabId in
+  //   their location object when targeting a non-default tab.
+  // • endOfSegmentLocation: { tabId } is the safest way to append to a tab —
+  //   no need to compute the last endIndex manually.
+  // • GET document requires ?includeTabsContent=true to return tab body content.
+  //   Without it, tabs[] is present but documentTab.body is empty.
+  // • Deleting a parent tab cascades and deletes all its child tabs.
+  // • The first tab (index 0) cannot be deleted unless at least one other tab exists.
+  // ─────────────────────────────────────────────────────────────────────────────
 
   server.tool("get_doc_tabs", "List all tabs in a Google Doc with their hierarchy, IDs, titles, and emoji icons.", {
     document_id: z.string(),
   }, async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=true") as any;
-    const tabs: any[] = doc.tabs || [];
-    if (!tabs.length) {
-      return { content: [{ type: "text", text: `Document "${doc.title}" has no named tabs (uses the default single-tab layout).` }] };
+    // includeTabsContent=false is enough for tab metadata — faster, smaller response
+    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=false") as any;
+    const rootTabs: any[] = doc.tabs || [];
+
+    interface TabInfo {
+      tab_id: string;
+      title: string;
+      index: number;
+      nested_level: number;
+      parent_tab_id: string | null;
+      icon_emoji: string | null;
+      child_count: number;
     }
 
-    function formatTabs(tabList: any[], indent = ""): string[] {
-      const lines: string[] = [];
+    function flattenTabs(tabList: any[], level = 0): TabInfo[] {
+      const result: TabInfo[] = [];
       for (const tab of tabList) {
-        const p = tab.tabProperties;
-        const emoji = p?.iconEmoji ? `${p.iconEmoji} ` : "";
-        lines.push(`${indent}${emoji}${p?.title || "(Untitled)"}`);
-        lines.push(`${indent}  ID: ${p?.tabId}`);
-        lines.push(`${indent}  Index: ${p?.index ?? "?"} | Level: ${p?.nestingLevel ?? 0}`);
-        if (p?.parentTabId) lines.push(`${indent}  Parent ID: ${p.parentTabId}`);
+        const p = tab.tabProperties || {};
+        result.push({
+          tab_id: p.tabId ?? "",
+          title: p.title ?? "(Untitled)",
+          index: p.index ?? 0,
+          nested_level: level,
+          parent_tab_id: p.parentTabId ?? null,
+          icon_emoji: p.iconEmoji ?? null,
+          child_count: tab.childTabs?.length ?? 0,
+        });
         if (tab.childTabs?.length) {
-          lines.push(`${indent}  ↳ ${tab.childTabs.length} child tab(s):`);
-          lines.push(...formatTabs(tab.childTabs, indent + "    "));
+          result.push(...flattenTabs(tab.childTabs, level + 1));
         }
-        lines.push("");
       }
-      return lines;
+      return result;
     }
 
-    const lines = [
-      `Document: ${doc.title}`,
-      `Root-level tabs: ${tabs.length}`,
-      "",
-      ...formatTabs(tabs),
-    ];
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    const tabs = flattenTabs(rootTabs);
+
+    if (!tabs.length) {
+      return { content: [{ type: "text", text: JSON.stringify({
+        document_title: doc.title,
+        document_id,
+        tab_count: 0,
+        tabs: [],
+        note: "Document uses default single-tab layout — no named tabs.",
+      }, null, 2) }] };
+    }
+
+    return { content: [{ type: "text", text: JSON.stringify({
+      document_title: doc.title,
+      document_id,
+      tab_count: tabs.length,
+      tabs,
+    }, null, 2) }] };
   });
 
   // ─── Tab: Read content of a specific tab ─────────────────────────────────────
