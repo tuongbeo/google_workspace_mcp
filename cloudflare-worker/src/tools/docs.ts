@@ -395,21 +395,19 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 
-  server.tool("insert_doc_tab", "Insert (add) a new tab in a Google Doc. Returns the new tab ID.", {
+  server.tool("insert_doc_tab", "Insert (add) a new tab in a Google Doc. Returns the new tab ID. New tab is appended after existing tabs (Google API does not support specifying position).", {
     document_id: z.string(),
     title: z.string().describe("Tab title"),
     icon_emoji: z.string().optional().describe("Optional emoji icon, e.g. '📋', '✅', '📊'"),
     parent_tab_id: z.string().optional().describe("Parent tab ID to create a nested (child) tab"),
-    insertion_index: z.number().optional().describe("Zero-based position among sibling tabs"),
-  }, async ({ document_id, title, icon_emoji, parent_tab_id, insertion_index }) => {
+  }, async ({ document_id, title, icon_emoji, parent_tab_id }) => {
     const { accessToken } = await getCreds();
+    // addDocumentTab only accepts tabProperties — no other fields allowed
     const tabProperties: Record<string, unknown> = { title };
     if (icon_emoji) tabProperties.iconEmoji = icon_emoji;
     if (parent_tab_id) tabProperties.parentTabId = parent_tab_id;
-    const reqBody: Record<string, unknown> = { tabProperties };
-    if (insertion_index !== undefined) reqBody.insertionIndex = insertion_index;
     const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ addDocumentTab: reqBody }]
+      requests: [{ addDocumentTab: { tabProperties } }]
     }) as any;
     const newTab = result.replies?.[0]?.addDocumentTab?.tabProperties;
     const lines = [`Tab "${title}" created successfully.`];
