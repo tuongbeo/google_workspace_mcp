@@ -13,6 +13,7 @@ import { registerSheetsTools, registerSheetsExtraTools } from "./tools/sheets";
 import { registerContactsTools, registerContactsExtraTools } from "./tools/contacts";
 import { registerAppsScriptTools, registerAppsScriptExtraTools } from "./tools/appsscript";
 import { registerSearchTools } from "./tools/search";
+import { registerSlidesExtendedTools } from "./tools/slides";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -66,6 +67,7 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   registerSheetsTools(server, getCreds);        // 8 tools
   registerSheetsExtraTools(server, getCreds);   // +1 tool (conditional formatting)
   registerSlidesTools(server, getCreds);        // 5 tools
+  registerSlidesExtendedTools(server, getCreds); // +18 Slides tools (dup, reorder, bg, notes, text, image, table)
   registerChatTools(server, getCreds);          // 4 tools
   registerTasksTools(server, getCreds);         // 9 tools
   registerFormsTools(server, getCreds);         // 5 tools
@@ -75,7 +77,7 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   registerAppsScriptExtraTools(server, getCreds); // +5 tools (versions, delete, metrics)
   registerSearchTools(server, getCreds, env);   // 3 tools
   registerWorkspaceExtraTools(server, getCreds); // +6 tools (slides page/thumb, chat reaction/attach, task list, form settings)
-  // ─────────────────────────────────────────────────────── Total: ~130 tools ──
+  // ─────────────────────────────────────────────────────── Total: ~148 tools ──
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
