@@ -609,84 +609,205 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 
-  // ─── @Mention Smart Chip: Insert person mention ────────────────────────────
+  // ─── @Mention Smart Chip ─────────────────────────────────────────────────────
+  //
+  // Core behavior of insertPerson:
+  //   • Always uses location: { index, tabId? } — NOT endOfSegmentLocation.
+  //     endOfSegmentLocation is unreliable for insertPerson (API inconsistency).
+  //   • When no index is given, the tool auto-fetches the document to find the
+  //     safe insertion point (last body endIndex - 1).
+  //   • prefix_text / suffix_text allow inserting context around the chip in a
+  //     single batchUpdate, avoiding the 2-step workaround of insertText + insertPerson.
+  //
+  // Index offset rule for batched requests:
+  //   When prefix_text is N chars long, the chip must be at (baseIndex + N).
+  //   Requests within one batchUpdate are applied sequentially, so indices
+  //   in later requests must account for text already inserted.
+  // ─────────────────────────────────────────────────────────────────────────────
 
-  server.tool("insert_person_mention", "Insert a @mention smart chip (person) into a Google Doc. The chip links to the person's Google profile and can trigger notifications if the document is shared with them.", {
-    document_id: z.string(),
-    email: z.string().describe("Google account email of the person to mention"),
-    name: z.string().optional().describe("Display name shown for the chip (if omitted, email is shown)"),
-    index: z.number().optional().describe("Character index in the document where the mention is inserted"),
-    tab_id: z.string().optional().describe("Tab ID to insert into (default: first/default tab)"),
-    at_end: z.boolean().optional().default(false).describe("If true, append the mention at the end of the tab content (ignores index)"),
-  }, async ({ document_id, email, name, index, tab_id, at_end = false }) => {
-    const { accessToken } = await getCreds();
+  server.tool("insert_person_mention",
+    "Insert a @mention smart chip into a Google Doc. " +
+    "The chip is a real Google smart chip (not plain text) linked to the person's Google profile. " +
+    "Optionally wrap the chip with prefix/suffix text in the same operation. " +
+    "If no index is provided, the chip is appended at the end of the document body.",
+    {
+      document_id: z.string(),
+      email: z.string().describe("Google account email of the person to mention"),
+      name: z.string().optional().describe("Display name for the chip. If omitted, email is displayed."),
+      index: z.number().optional().describe(
+        "Character index where the chip is inserted. " +
+        "If omitted, the tool auto-detects the safe end of the document body."
+      ),
+      tab_id: z.string().optional().describe("Tab ID to insert into. Omit for default/single-tab docs."),
+      prefix_text: z.string().optional().describe(
+        "Text to insert immediately BEFORE the chip (e.g. 'Assigned to: '). " +
+        "Inserted in the same batchUpdate — no need for a separate insertText call."
+      ),
+      suffix_text: z.string().optional().describe(
+        "Text to insert immediately AFTER the chip (e.g. ' please review'). " +
+        "Inserted in the same batchUpdate."
+      ),
+    },
+    async ({ document_id, email, name, index, tab_id, prefix_text, suffix_text }) => {
+      const { accessToken } = await getCreds();
 
-    // Validate email
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return { content: [{ type: "text", text: `Invalid email format: "${email}"` }] };
-    }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { content: [{ type: "text", text: `Invalid email format: "${email}"` }] };
+      }
 
-    const personProperties: Record<string, unknown> = { email };
-    if (name) personProperties.name = name;
+      // ── Auto-detect insertion index if not provided ──────────────────────────
+      let baseIndex = index;
+      if (baseIndex === undefined) {
+        const path = tab_id ? "?includeTabsContent=true" : "";
+        const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
 
-    let locationField: Record<string, unknown>;
-    if (at_end || index === undefined) {
-      // Use endOfSegmentLocation → appends at end of the segment (tab body)
-      const endLoc: Record<string, unknown> = {};
-      if (tab_id) endLoc.tabId = tab_id;
-      locationField = { endOfSegmentLocation: endLoc };
-    } else {
-      // Use specific index
-      const loc: Record<string, unknown> = { index };
-      if (tab_id) loc.tabId = tab_id;
-      locationField = { location: loc };
-    }
-
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{
-        insertPerson: {
-          personProperties,
-          ...locationField,
+        if (tab_id) {
+          function findTab(tabList: any[], id: string): any | null {
+            for (const tab of tabList) {
+              if (tab.tabProperties?.tabId === id) return tab;
+              if (tab.childTabs?.length) { const f = findTab(tab.childTabs, id); if (f) return f; }
+            }
+            return null;
+          }
+          const tab = findTab(doc.tabs || [], tab_id);
+          if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs.` }] };
+          const tabBody = tab.documentTab?.body?.content || [];
+          const lastElem = tabBody[tabBody.length - 1];
+          baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
+        } else {
+          const body = doc.body?.content || [];
+          const lastElem = body[body.length - 1];
+          baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
         }
-      }]
-    });
+      }
 
-    const displayLabel = name || email;
-    const tabNote = tab_id ? ` in tab ${tab_id}` : "";
-    const posNote = at_end || index === undefined ? " at end of content" : ` at index ${index}`;
-    return { content: [{ type: "text", text: `@mention smart chip inserted for "${displayLabel}"${tabNote}${posNote}.\nNote: The person will only receive a notification if they have access to this document.` }] };
-  });
+      // ── Build batched requests ───────────────────────────────────────────────
+      // All indices are calculated relative to baseIndex, accounting for the
+      // sequential application of requests within one batchUpdate.
+      const requests: any[] = [];
+      let chipIndex = baseIndex;
 
-  // ─── @Mention: Insert multiple mentions at once ────────────────────────────
+      if (prefix_text) {
+        const loc: Record<string, unknown> = { index: baseIndex };
+        if (tab_id) loc.tabId = tab_id;
+        requests.push({ insertText: { location: loc, text: prefix_text } });
+        chipIndex = baseIndex + prefix_text.length; // chip goes after prefix
+      }
 
-  server.tool("insert_multiple_mentions", "Insert multiple @mention smart chips in one batch operation (e.g., to populate a team roster).", {
-    document_id: z.string(),
-    mentions: z.array(z.object({
-      email: z.string().describe("Google account email"),
-      name: z.string().optional().describe("Display name"),
-      index: z.number().describe("Character index where the mention is inserted"),
-      tab_id: z.string().optional().describe("Tab ID (omit for default tab)"),
-    })).describe("List of mentions to insert, sorted by DESCENDING index to avoid offset drift"),
-  }, async ({ document_id, mentions }) => {
-    const { accessToken } = await getCreds();
+      const chipLoc: Record<string, unknown> = { index: chipIndex };
+      if (tab_id) chipLoc.tabId = tab_id;
+      const personProperties: Record<string, unknown> = { email };
+      if (name) personProperties.name = name;
+      requests.push({ insertPerson: { personProperties, location: chipLoc } });
 
-    // Validate emails
-    const invalid = mentions.filter(m => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email));
-    if (invalid.length) {
-      return { content: [{ type: "text", text: `Invalid email(s): ${invalid.map(m => m.email).join(", ")}` }] };
+      if (suffix_text) {
+        // chip occupies 1 index position; suffix goes right after
+        const suffixLoc: Record<string, unknown> = { index: chipIndex + 1 };
+        if (tab_id) suffixLoc.tabId = tab_id;
+        requests.push({ insertText: { location: suffixLoc, text: suffix_text } });
+      }
+
+      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+
+      const displayLabel = name || email;
+      const parts: string[] = [`Smart chip inserted for "${displayLabel}" at index ${chipIndex}.`];
+      if (prefix_text) parts.push(`Prefix: "${prefix_text}"`);
+      if (suffix_text) parts.push(`Suffix: "${suffix_text}"`);
+      if (tab_id) parts.push(`Tab: ${tab_id}`);
+      parts.push("Note: Notifications only fire if the person has access to the document.");
+      return { content: [{ type: "text", text: parts.join("\n") }] };
     }
+  );
 
-    const requests = mentions.map(m => {
-      const loc: Record<string, unknown> = { index: m.index };
-      if (m.tab_id) loc.tabId = m.tab_id;
-      const personProperties: Record<string, unknown> = { email: m.email };
-      if (m.name) personProperties.name = m.name;
-      return { insertPerson: { personProperties, location: loc } };
-    });
+  // ─── @Mention: Batch insert multiple chips on a new line ──────────────────
 
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+  server.tool("insert_multiple_mentions",
+    "Insert multiple @mention smart chips in one batch operation. " +
+    "Each mention is appended as a new line: '[prefix] [chip] [suffix]'. " +
+    "All chips are real Google smart chips, not plain text. " +
+    "The tool auto-detects the end of the document — no need to compute indices manually.",
+    {
+      document_id: z.string(),
+      mentions: z.array(z.object({
+        email: z.string().describe("Google account email"),
+        name: z.string().optional().describe("Display name"),
+        prefix_text: z.string().optional().describe("Text before the chip on the same line, e.g. '- Assigned: '"),
+        suffix_text: z.string().optional().describe("Text after the chip on the same line"),
+      })).describe("List of people to mention. Each gets their own line appended to the document."),
+      tab_id: z.string().optional().describe("Tab ID to append into. Omit for default tab."),
+    },
+    async ({ document_id, mentions, tab_id }) => {
+      const { accessToken } = await getCreds();
 
-    const summary = mentions.map(m => `  • ${m.name || m.email} @ index ${m.index}`).join("\n");
-    return { content: [{ type: "text", text: `${mentions.length} @mention(s) inserted:\n${summary}` }] };
-  });
+      const invalid = mentions.filter(m => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email));
+      if (invalid.length) {
+        return { content: [{ type: "text", text: `Invalid email(s): ${invalid.map(m => m.email).join(", ")}` }] };
+      }
+
+      // Fetch current doc end index once
+      const path = tab_id ? "?includeTabsContent=true" : "";
+      const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
+
+      let baseIndex: number;
+      if (tab_id) {
+        function findTab2(tabList: any[], id: string): any | null {
+          for (const tab of tabList) {
+            if (tab.tabProperties?.tabId === id) return tab;
+            if (tab.childTabs?.length) { const f = findTab2(tab.childTabs, id); if (f) return f; }
+          }
+          return null;
+        }
+        const tab = findTab2(doc.tabs || [], tab_id);
+        if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found.` }] };
+        const tabBody = tab.documentTab?.body?.content || [];
+        const lastElem = tabBody[tabBody.length - 1];
+        baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
+      } else {
+        const body = doc.body?.content || [];
+        const lastElem = body[body.length - 1];
+        baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
+      }
+
+      // Build all requests, tracking running offset caused by each insertion
+      const requests: any[] = [];
+      let offset = 0; // cumulative chars inserted so far in this batch
+
+      for (const m of mentions) {
+        const lineStart = baseIndex + offset;
+        const prefix = "\n" + (m.prefix_text || "");
+        const suffix = m.suffix_text || "";
+
+        // 1. Insert newline + prefix text
+        const prefixLoc: Record<string, unknown> = { index: lineStart };
+        if (tab_id) prefixLoc.tabId = tab_id;
+        requests.push({ insertText: { location: prefixLoc, text: prefix } });
+        offset += prefix.length;
+
+        // 2. Insert the smart chip
+        const chipIdx = baseIndex + offset;
+        const chipLoc: Record<string, unknown> = { index: chipIdx };
+        if (tab_id) chipLoc.tabId = tab_id;
+        const personProperties: Record<string, unknown> = { email: m.email };
+        if (m.name) personProperties.name = m.name;
+        requests.push({ insertPerson: { personProperties, location: chipLoc } });
+        offset += 1; // chip occupies exactly 1 index position
+
+        // 3. Insert suffix text
+        if (suffix) {
+          const suffixLoc: Record<string, unknown> = { index: baseIndex + offset };
+          if (tab_id) suffixLoc.tabId = tab_id;
+          requests.push({ insertText: { location: suffixLoc, text: suffix } });
+          offset += suffix.length;
+        }
+      }
+
+      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+
+      const summary = mentions.map(m => {
+        const line = [m.prefix_text, `@${m.name || m.email}`, m.suffix_text].filter(Boolean).join(" ");
+        return `  • ${line}`;
+      }).join("\n");
+      return { content: [{ type: "text", text: `${mentions.length} smart chip(s) inserted:\n${summary}` }] };
+    }
+  );
 }
