@@ -9,22 +9,73 @@ type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
 
-  server.tool("get_google_doc", "Get the content of a Google Doc as text.", {
+  server.tool("get_google_doc", "Get the content of a Google Doc as text. Supports multi-tab documents.", {
     document_id: z.string(),
-  }, async ({ document_id }) => {
+    tab_id: z.string().optional().describe("Read a specific tab by ID (use get_doc_tabs to find IDs). If omitted, reads the default/body content."),
+    include_all_tabs: z.boolean().optional().default(false).describe("If true, concatenates content from all tabs"),
+  }, async ({ document_id, tab_id, include_all_tabs = false }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
-    const lines: string[] = [`# ${doc.title}`, ""];
-    for (const elem of doc.body?.content || []) {
-      if (!elem.paragraph) continue;
-      const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
-      const text = (elem.paragraph.elements || []).map((e: any) => e.textRun?.content || "").join("").trimEnd();
-      if (!text.trim()) continue;
-      if (style.startsWith("HEADING_1")) lines.push(`# ${text}`);
-      else if (style.startsWith("HEADING_2")) lines.push(`## ${text}`);
-      else if (style.startsWith("HEADING_3")) lines.push(`### ${text}`);
-      else lines.push(text);
+    const needsTabs = !!(tab_id || include_all_tabs);
+    const path = needsTabs ? "?includeTabsContent=true" : "";
+    const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
+
+    function extractContent(bodyContent: any[]): string[] {
+      const lines: string[] = [];
+      for (const elem of bodyContent || []) {
+        if (!elem.paragraph) continue;
+        const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
+        const text = (elem.paragraph.elements || [])
+          .map((e: any) => {
+            if (e.textRun) return e.textRun.content || "";
+            if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
+            return "";
+          })
+          .join("")
+          .trimEnd();
+        if (!text.trim()) continue;
+        if (style === "HEADING_1") lines.push(`# ${text}`);
+        else if (style === "HEADING_2") lines.push(`## ${text}`);
+        else if (style === "HEADING_3") lines.push(`### ${text}`);
+        else lines.push(text);
+      }
+      return lines;
     }
+
+    const lines: string[] = [`# ${doc.title}`, ""];
+
+    if (include_all_tabs && doc.tabs?.length) {
+      // Concat all tabs
+      function walkTabs(tabList: any[]) {
+        for (const tab of tabList) {
+          const p = tab.tabProperties;
+          lines.push(`\n## [Tab] ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"} (${p?.tabId})`);
+          lines.push(...extractContent(tab.documentTab?.body?.content));
+          if (tab.childTabs?.length) walkTabs(tab.childTabs);
+        }
+      }
+      walkTabs(doc.tabs);
+    } else if (tab_id && doc.tabs?.length) {
+      // Find specific tab
+      function findTab(tabList: any[], id: string): any | null {
+        for (const tab of tabList) {
+          if (tab.tabProperties?.tabId === id) return tab;
+          if (tab.childTabs?.length) {
+            const found = findTab(tab.childTabs, id);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+      const tab = findTab(doc.tabs, tab_id);
+      if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
+      const p = tab.tabProperties;
+      lines.push(`[Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}]`, "");
+      lines.push(...extractContent(tab.documentTab?.body?.content));
+    } else {
+      // Default: read body content (single-tab or legacy doc)
+      lines.push(...extractContent(doc.body?.content));
+    }
+
     return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 
@@ -344,22 +395,29 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 
-  server.tool("insert_doc_tab", "Insert a new tab in a Google Doc (Docs tabs feature).", {
+  server.tool("insert_doc_tab", "Insert (add) a new tab in a Google Doc. Returns the new tab ID.", {
     document_id: z.string(),
     title: z.string().describe("Tab title"),
-    parent_tab_id: z.string().optional().describe("Parent tab ID for nested tabs"),
-    insertion_index: z.number().optional().describe("Position (0-based)"),
-  }, async ({ document_id, title, parent_tab_id, insertion_index }) => {
+    icon_emoji: z.string().optional().describe("Optional emoji icon, e.g. '📋', '✅', '📊'"),
+    parent_tab_id: z.string().optional().describe("Parent tab ID to create a nested (child) tab"),
+    insertion_index: z.number().optional().describe("Zero-based position among sibling tabs"),
+  }, async ({ document_id, title, icon_emoji, parent_tab_id, insertion_index }) => {
     const { accessToken } = await getCreds();
     const tabProperties: Record<string, unknown> = { title };
-    const req: Record<string, unknown> = { tabProperties };
-    if (parent_tab_id) req.parentTabId = parent_tab_id;
-    if (insertion_index !== undefined) req.insertionIndex = insertion_index;
+    if (icon_emoji) tabProperties.iconEmoji = icon_emoji;
+    if (parent_tab_id) tabProperties.parentTabId = parent_tab_id;
+    const reqBody: Record<string, unknown> = { tabProperties };
+    if (insertion_index !== undefined) reqBody.insertionIndex = insertion_index;
     const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ insertTab: req }]
+      requests: [{ addDocumentTab: reqBody }]
     }) as any;
-    const newTabId = result.replies?.[0]?.insertTab?.tabId;
-    return { content: [{ type: "text", text: `Tab "${title}" created.${newTabId ? ` Tab ID: ${newTabId}` : ""}` }] };
+    const newTab = result.replies?.[0]?.addDocumentTab?.tabProperties;
+    const lines = [`Tab "${title}" created successfully.`];
+    if (newTab?.tabId) lines.push(`Tab ID: ${newTab.tabId}`);
+    if (newTab?.index !== undefined) lines.push(`Index: ${newTab.index}`);
+    if (icon_emoji) lines.push(`Icon: ${icon_emoji}`);
+    if (parent_tab_id) lines.push(`Parent tab: ${parent_tab_id}`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   });
 
   server.tool("delete_doc_tab", "Delete a tab from a Google Doc.", {
@@ -373,18 +431,192 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
   });
 
-  server.tool("update_doc_tab", "Update properties of a Google Doc tab (title, nesting).", {
+  server.tool("update_doc_tab", "Update properties of a Google Doc tab (title and/or emoji icon).", {
     document_id: z.string(),
-    tab_id: z.string(),
-    title: z.string().optional(),
-  }, async ({ document_id, tab_id, title }) => {
+    tab_id: z.string().describe("Tab ID to update"),
+    title: z.string().optional().describe("New title for the tab"),
+    icon_emoji: z.string().optional().describe("New emoji icon (e.g. '🎯'). Pass empty string to clear."),
+  }, async ({ document_id, tab_id, title, icon_emoji }) => {
     const { accessToken } = await getCreds();
-    const tabProperties: Record<string, unknown> = {};
+    const tabProperties: Record<string, unknown> = { tabId: tab_id };
     const fields: string[] = [];
-    if (title) { tabProperties.title = title; fields.push("title"); }
+    if (title !== undefined) { tabProperties.title = title; fields.push("title"); }
+    if (icon_emoji !== undefined) { tabProperties.iconEmoji = icon_emoji; fields.push("iconEmoji"); }
+    if (!fields.length) return { content: [{ type: "text", text: "Nothing to update — provide title and/or icon_emoji." }] };
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ updateTabProperties: { tabId: tab_id, tabProperties, fields: fields.join(",") } }]
+      requests: [{ updateDocumentTabProperties: { tabProperties, fields: fields.join(",") } }]
     });
-    return { content: [{ type: "text", text: `Tab ${tab_id} updated.` }] };
+    const updated = fields.map(f => f === "title" ? `title → "${title}"` : `emoji → "${icon_emoji}"`).join(", ");
+    return { content: [{ type: "text", text: `Tab ${tab_id} updated: ${updated}` }] };
+  });
+
+  // ─── Tab: List all tabs with hierarchy ────────────────────────────────────────
+
+  server.tool("get_doc_tabs", "List all tabs in a Google Doc with their hierarchy, IDs, titles, and emoji icons.", {
+    document_id: z.string(),
+  }, async ({ document_id }) => {
+    const { accessToken } = await getCreds();
+    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=true") as any;
+    const tabs: any[] = doc.tabs || [];
+    if (!tabs.length) {
+      return { content: [{ type: "text", text: `Document "${doc.title}" has no named tabs (uses the default single-tab layout).` }] };
+    }
+
+    function formatTabs(tabList: any[], indent = ""): string[] {
+      const lines: string[] = [];
+      for (const tab of tabList) {
+        const p = tab.tabProperties;
+        const emoji = p?.iconEmoji ? `${p.iconEmoji} ` : "";
+        lines.push(`${indent}${emoji}${p?.title || "(Untitled)"}`);
+        lines.push(`${indent}  ID: ${p?.tabId}`);
+        lines.push(`${indent}  Index: ${p?.index ?? "?"} | Level: ${p?.nestingLevel ?? 0}`);
+        if (p?.parentTabId) lines.push(`${indent}  Parent ID: ${p.parentTabId}`);
+        if (tab.childTabs?.length) {
+          lines.push(`${indent}  ↳ ${tab.childTabs.length} child tab(s):`);
+          lines.push(...formatTabs(tab.childTabs, indent + "    "));
+        }
+        lines.push("");
+      }
+      return lines;
+    }
+
+    const lines = [
+      `Document: ${doc.title}`,
+      `Root-level tabs: ${tabs.length}`,
+      "",
+      ...formatTabs(tabs),
+    ];
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  // ─── Tab: Read content of a specific tab ─────────────────────────────────────
+
+  server.tool("get_doc_tab_content", "Get the text content of a specific tab in a Google Doc.", {
+    document_id: z.string(),
+    tab_id: z.string().describe("Tab ID to read (get from get_doc_tabs)"),
+  }, async ({ document_id, tab_id }) => {
+    const { accessToken } = await getCreds();
+    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=true") as any;
+
+    function findTab(tabList: any[], id: string): any | null {
+      for (const tab of tabList) {
+        if (tab.tabProperties?.tabId === id) return tab;
+        if (tab.childTabs?.length) {
+          const found = findTab(tab.childTabs, id);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    const tab = findTab(doc.tabs || [], tab_id);
+    if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
+
+    const p = tab.tabProperties;
+    const lines: string[] = [
+      `Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}`,
+      `ID: ${tab_id}`,
+      "",
+    ];
+
+    for (const elem of tab.documentTab?.body?.content || []) {
+      if (!elem.paragraph) continue;
+      const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
+      const text = (elem.paragraph.elements || [])
+        .map((e: any) => {
+          if (e.textRun) return e.textRun.content || "";
+          if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
+          return "";
+        })
+        .join("")
+        .trimEnd();
+      if (!text.trim()) continue;
+      if (style === "HEADING_1") lines.push(`# ${text}`);
+      else if (style === "HEADING_2") lines.push(`## ${text}`);
+      else if (style === "HEADING_3") lines.push(`### ${text}`);
+      else lines.push(text);
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
+  // ─── @Mention Smart Chip: Insert person mention ────────────────────────────
+
+  server.tool("insert_person_mention", "Insert a @mention smart chip (person) into a Google Doc. The chip links to the person's Google profile and can trigger notifications if the document is shared with them.", {
+    document_id: z.string(),
+    email: z.string().describe("Google account email of the person to mention"),
+    name: z.string().optional().describe("Display name shown for the chip (if omitted, email is shown)"),
+    index: z.number().optional().describe("Character index in the document where the mention is inserted"),
+    tab_id: z.string().optional().describe("Tab ID to insert into (default: first/default tab)"),
+    at_end: z.boolean().optional().default(false).describe("If true, append the mention at the end of the tab content (ignores index)"),
+  }, async ({ document_id, email, name, index, tab_id, at_end = false }) => {
+    const { accessToken } = await getCreds();
+
+    // Validate email
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return { content: [{ type: "text", text: `Invalid email format: "${email}"` }] };
+    }
+
+    const personProperties: Record<string, unknown> = { email };
+    if (name) personProperties.name = name;
+
+    let locationField: Record<string, unknown>;
+    if (at_end || index === undefined) {
+      // Use endOfSegmentLocation → appends at end of the segment (tab body)
+      const endLoc: Record<string, unknown> = {};
+      if (tab_id) endLoc.tabId = tab_id;
+      locationField = { endOfSegmentLocation: endLoc };
+    } else {
+      // Use specific index
+      const loc: Record<string, unknown> = { index };
+      if (tab_id) loc.tabId = tab_id;
+      locationField = { location: loc };
+    }
+
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      requests: [{
+        insertPerson: {
+          personProperties,
+          ...locationField,
+        }
+      }]
+    });
+
+    const displayLabel = name || email;
+    const tabNote = tab_id ? ` in tab ${tab_id}` : "";
+    const posNote = at_end || index === undefined ? " at end of content" : ` at index ${index}`;
+    return { content: [{ type: "text", text: `@mention smart chip inserted for "${displayLabel}"${tabNote}${posNote}.\nNote: The person will only receive a notification if they have access to this document.` }] };
+  });
+
+  // ─── @Mention: Insert multiple mentions at once ────────────────────────────
+
+  server.tool("insert_multiple_mentions", "Insert multiple @mention smart chips in one batch operation (e.g., to populate a team roster).", {
+    document_id: z.string(),
+    mentions: z.array(z.object({
+      email: z.string().describe("Google account email"),
+      name: z.string().optional().describe("Display name"),
+      index: z.number().describe("Character index where the mention is inserted"),
+      tab_id: z.string().optional().describe("Tab ID (omit for default tab)"),
+    })).describe("List of mentions to insert, sorted by DESCENDING index to avoid offset drift"),
+  }, async ({ document_id, mentions }) => {
+    const { accessToken } = await getCreds();
+
+    // Validate emails
+    const invalid = mentions.filter(m => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email));
+    if (invalid.length) {
+      return { content: [{ type: "text", text: `Invalid email(s): ${invalid.map(m => m.email).join(", ")}` }] };
+    }
+
+    const requests = mentions.map(m => {
+      const loc: Record<string, unknown> = { index: m.index };
+      if (m.tab_id) loc.tabId = m.tab_id;
+      const personProperties: Record<string, unknown> = { email: m.email };
+      if (m.name) personProperties.name = m.name;
+      return { insertPerson: { personProperties, location: loc } };
+    });
+
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+
+    const summary = mentions.map(m => `  • ${m.name || m.email} @ index ${m.index}`).join("\n");
+    return { content: [{ type: "text", text: `${mentions.length} @mention(s) inserted:\n${summary}` }] };
   });
 }
