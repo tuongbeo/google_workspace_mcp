@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Env } from "../types";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -16,7 +17,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     language: z.string().optional().describe("Language code, e.g. 'lang_vi'"),
     safe: z.enum(["active", "off"]).optional().default("off"),
     sort: z.string().optional().describe("Sort expression, e.g. 'date'"),
-  }, async ({ query, num = 10, start = 1, language, safe = "off", sort }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, num = 10, start = 1, language, safe = "off", sort }) => {
     if (!env.GOOGLE_PSE_API_KEY || !env.GOOGLE_PSE_ENGINE_ID) {
       return { content: [{ type: "text", text: "Custom Search not configured. Set GOOGLE_PSE_API_KEY and GOOGLE_PSE_ENGINE_ID in Worker secrets." }] };
     }
@@ -44,13 +45,13 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("search_custom_siterestrict", "Search within specific domains using Google Custom Search.", {
     query: z.string(),
     site_search: z.string().describe("Domain to restrict search, e.g. 'docs.anthropic.com'"),
     num: z.number().optional().default(10),
-  }, async ({ query, site_search, num = 10 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, site_search, num = 10 }) => {
     if (!env.GOOGLE_PSE_API_KEY || !env.GOOGLE_PSE_ENGINE_ID) {
       return { content: [{ type: "text", text: "Custom Search not configured." }] };
     }
@@ -72,9 +73,9 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
-  server.tool("get_search_engine_info", "Get info about the configured Programmable Search Engine.", {}, async () => {
+  server.tool("get_search_engine_info", "Get info about the configured Programmable Search Engine.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     if (!env.GOOGLE_PSE_API_KEY || !env.GOOGLE_PSE_ENGINE_ID) {
       return { content: [{ type: "text", text: "Custom Search not configured." }] };
     }
@@ -82,5 +83,5 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     if (!resp.ok) throw new Error(`API error: ${await resp.text()}`);
     const data = await resp.json() as any;
     return { content: [{ type: "text", text: `Search Engine: ${data.title || "N/A"}\nCX: ${env.GOOGLE_PSE_ENGINE_ID}\nKind: ${data.kind || "N/A"}` }] };
-  });
+  }));
 }

@@ -4,18 +4,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { calendarRequest } from "../google";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc) {
 
-  server.tool("list_calendars", "List all Google calendars accessible to the user.", {}, async () => {
+  server.tool("list_calendars", "List all Google calendars accessible to the user.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
     const data = await calendarRequest(accessToken, "/users/me/calendarList") as any;
     const items = data.items || [];
     const lines = items.map((c: any) => `- ${c.summary}${c.primary ? " (Primary)" : ""} | ID: ${c.id} | Color: ${c.backgroundColor || "N/A"}`);
     return { content: [{ type: "text", text: `Calendars (${items.length}):\n${lines.join("\n")}` }] };
-  });
+  }));
 
   server.tool("get_calendar_events", "Get events from a Google Calendar.", {
     calendar_id: z.string().optional().default("primary"),
@@ -24,7 +25,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     max_results: z.number().optional().default(25),
     query: z.string().optional().describe("Free text search"),
     show_deleted: z.boolean().optional().default(false),
-  }, async ({ calendar_id = "primary", time_min, time_max, max_results = 25, query, show_deleted = false }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ calendar_id = "primary", time_min, time_max, max_results = 25, query, show_deleted = false }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ singleEvents: "true", orderBy: "startTime", maxResults: String(max_results) });
     params.set("timeMin", time_min || new Date().toISOString());
@@ -46,12 +47,12 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("get_calendar_event", "Get full details of a specific calendar event.", {
     event_id: z.string(),
     calendar_id: z.string().optional().default("primary"),
-  }, async ({ event_id, calendar_id = "primary" }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ event_id, calendar_id = "primary" }) => {
     const { accessToken } = await getCreds();
     const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as any;
     const lines = [
@@ -68,7 +69,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       if (meet) lines.push(`Google Meet: ${meet.uri}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("create_calendar_event", "Create a new Google Calendar event.", {
     summary: z.string(),
@@ -83,7 +84,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     recurrence: z.array(z.string()).optional().describe("RRULE strings, e.g. ['RRULE:FREQ=WEEKLY;BYDAY=MO']"),
     color_id: z.string().optional().describe("1-11: 1=Lavender,2=Sage,3=Grape,4=Flamingo,5=Banana,6=Tangerine,7=Peacock,8=Graphite,9=Blueberry,10=Basil,11=Tomato"),
     all_day: z.boolean().optional().default(false),
-  }, async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false }) => {
     const { accessToken } = await getCreds();
     const event: Record<string, unknown> = { summary };
     if (all_day) {
@@ -109,7 +110,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       if (meet) msg += `\nGoogle Meet: ${meet.uri}`;
     }
     return { content: [{ type: "text", text: msg }] };
-  });
+  }));
 
   server.tool("update_calendar_event", "Update an existing Google Calendar event.", {
     event_id: z.string(),
@@ -122,7 +123,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     attendees: z.array(z.string()).optional().describe("Full attendee list (replaces existing)"),
     color_id: z.string().optional(),
     send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all"),
-  }, async ({ event_id, calendar_id = "primary", summary, start_time, end_time, description, location, attendees, color_id, send_updates = "all" }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ event_id, calendar_id = "primary", summary, start_time, end_time, description, location, attendees, color_id, send_updates = "all" }) => {
     const { accessToken } = await getCreds();
     const patch: Record<string, unknown> = {};
     if (summary) patch.summary = summary;
@@ -134,39 +135,38 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (color_id) patch.colorId = color_id;
     const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "PATCH", patch) as any;
     return { content: [{ type: "text", text: `Event updated: "${result.summary}"\nLink: ${result.htmlLink}` }] };
-  });
+  }));
 
   server.tool("delete_calendar_event", "Delete a Google Calendar event.", {
     event_id: z.string(),
     calendar_id: z.string().optional().default("primary"),
     send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all"),
-  }, async ({ event_id, calendar_id = "primary", send_updates = "all" }) => {
+  }, withErrorHandler(async ({ event_id, calendar_id = "primary", send_updates = "all" }) => {
     const { accessToken } = await getCreds();
     await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "DELETE");
     return { content: [{ type: "text", text: `Event ${event_id} deleted.` }] };
-  });
+  }));
 
   server.tool("respond_to_calendar_event", "RSVP to a calendar event invitation.", {
     event_id: z.string(),
     response: z.enum(["accepted", "declined", "tentative"]),
     calendar_id: z.string().optional().default("primary"),
     comment: z.string().optional(),
-  }, async ({ event_id, response, calendar_id = "primary", comment }) => {
+  }, withErrorHandler(async ({ event_id, response, calendar_id = "primary", comment }) => {
     const { accessToken } = await getCreds();
     const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as any;
-    const meEmail = "me";
     const attendees = (ev.attendees || []).map((a: any) =>
       a.self ? { ...a, responseStatus: response, comment: comment || a.comment } : a
     );
     const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`, "PATCH", { attendees }) as any;
     return { content: [{ type: "text", text: `RSVP updated to "${response}" for event: "${result.summary}"` }] };
-  });
+  }));
 
   server.tool("query_calendar_freebusy", "Query free/busy time for calendars.", {
     time_min: z.string().describe("Start time RFC3339"),
     time_max: z.string().describe("End time RFC3339"),
     calendar_ids: z.array(z.string()).optional().default(["primary"]),
-  }, async ({ time_min, time_max, calendar_ids = ["primary"] }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ time_min, time_max, calendar_ids = ["primary"] }) => {
     const { accessToken } = await getCreds();
     const result = await calendarRequest(accessToken, "/freeBusy", "POST", {
       timeMin: time_min, timeMax: time_max, items: calendar_ids.map(id => ({ id })),
@@ -180,5 +180,5 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 }

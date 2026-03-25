@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -13,7 +14,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     document_id: z.string(),
     tab_id: z.string().optional().describe("Read a specific tab by ID (use get_doc_tabs to find IDs). If omitted, reads the default/body content."),
     include_all_tabs: z.boolean().optional().default(false).describe("If true, concatenates content from all tabs"),
-  }, async ({ document_id, tab_id, include_all_tabs = false }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, tab_id, include_all_tabs = false }) => {
     const { accessToken } = await getCreds();
     const needsTabs = !!(tab_id || include_all_tabs);
     const path = needsTabs ? "?includeTabsContent=true" : "";
@@ -44,7 +45,6 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     const lines: string[] = [`# ${doc.title}`, ""];
 
     if (include_all_tabs && doc.tabs?.length) {
-      // Concat all tabs
       function walkTabs(tabList: any[]) {
         for (const tab of tabList) {
           const p = tab.tabProperties;
@@ -55,7 +55,6 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       }
       walkTabs(doc.tabs);
     } else if (tab_id && doc.tabs?.length) {
-      // Find specific tab
       function findTab(tabList: any[], id: string): any | null {
         for (const tab of tabList) {
           if (tab.tabProperties?.tabId === id) return tab;
@@ -72,17 +71,16 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       lines.push(`[Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}]`, "");
       lines.push(...extractContent(tab.documentTab?.body?.content));
     } else {
-      // Default: read body content (single-tab or legacy doc)
       lines.push(...extractContent(doc.body?.content));
     }
 
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("create_google_doc", "Create a new Google Doc.", {
     title: z.string(),
     content: z.string().optional(),
-  }, async ({ title, content }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ title, content }) => {
     const { accessToken } = await getCreds();
     const doc = await docsRequest(accessToken, "", "POST", "", { title }) as any;
     if (content) {
@@ -91,7 +89,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       });
     }
     return { content: [{ type: "text", text: `Doc created: "${doc.title}"\nID: ${doc.documentId}\nURL: https://docs.google.com/document/d/${doc.documentId}/edit` }] };
-  });
+  }));
 
   server.tool("append_to_google_doc", "Append text to an existing Google Doc. Supports multi-tab documents via tab_id.", {
     document_id: z.string(),
@@ -100,15 +98,10 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       "Tab ID to append into. If omitted, appends to the default tab (or the only tab for single-tab docs). " +
       "Get tab IDs from get_doc_tabs."
     ),
-  }, async ({ document_id, text, tab_id }) => {
+  }, withErrorHandler(async ({ document_id, text, tab_id }) => {
     const { accessToken } = await getCreds();
-
-    // endOfSegmentLocation is the correct, safe way to append content to any tab.
-    // It avoids the need to compute endIndex manually (which differs per-tab).
-    // Without tab_id → appends to default/first tab segment.
     const endOfSegmentLocation: Record<string, unknown> = {};
     if (tab_id) endOfSegmentLocation.tabId = tab_id;
-
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
       requests: [{
         insertText: {
@@ -117,17 +110,16 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
         }
       }],
     });
-
     const target = tab_id ? `tab ${tab_id}` : "default tab";
     return { content: [{ type: "text", text: `Text appended to ${target} in document ${document_id}.` }] };
-  });
+  }));
 
   server.tool("modify_doc_text", "Replace text in a Google Doc (find and replace).", {
     document_id: z.string(),
     old_text: z.string().describe("Text to find and replace"),
     new_text: z.string().describe("Replacement text"),
     match_case: z.boolean().optional().default(false),
-  }, async ({ document_id, old_text, new_text, match_case = false }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, old_text, new_text, match_case = false }) => {
     const { accessToken } = await getCreds();
     const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
       requests: [{
@@ -139,12 +131,12 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     }) as any;
     const count = result.replies?.[0]?.replaceAllText?.occurrencesChanged || 0;
     return { content: [{ type: "text", text: `Replaced ${count} occurrence(s) of "${old_text}" → "${new_text}"` }] };
-  });
+  }));
 
   server.tool("find_and_replace_doc", "Find and replace text across a Google Doc.", {
     document_id: z.string(),
     replacements: z.array(z.object({ find: z.string(), replace: z.string(), match_case: z.boolean().optional() })).describe("List of find/replace pairs"),
-  }, async ({ document_id, replacements }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, replacements }) => {
     const { accessToken } = await getCreds();
     const requests = replacements.map(r => ({
       replaceAllText: { containsText: { text: r.find, matchCase: r.match_case || false }, replaceText: r.replace }
@@ -154,7 +146,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       `"${replacements[i].find}" → "${replacements[i].replace}": ${r.replaceAllText?.occurrencesChanged || 0} occurrence(s)`
     );
     return { content: [{ type: "text", text: `Find and replace results:\n${counts.join("\n")}` }] };
-  });
+  }));
 
   server.tool("insert_doc_elements", "Insert elements into a Google Doc (table, page break, horizontal rule).", {
     document_id: z.string(),
@@ -162,7 +154,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     index: z.number().optional().default(1).describe("Insertion index in the doc body"),
     table_rows: z.number().optional().default(3).describe("Rows for table"),
     table_columns: z.number().optional().default(3).describe("Columns for table"),
-  }, async ({ document_id, element_type, index = 1, table_rows = 3, table_columns = 3 }) => {
+  }, withErrorHandler(async ({ document_id, element_type, index = 1, table_rows = 3, table_columns = 3 }) => {
     const { accessToken } = await getCreds();
     let request: Record<string, unknown>;
     if (element_type === "table") {
@@ -170,12 +162,11 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     } else if (element_type === "page_break") {
       request = { insertPageBreak: { location: { index } } };
     } else {
-      request = { insertInlineImage: undefined }; // horizontal rule via paragraph
       request = { insertText: { location: { index }, text: "\n---\n" } };
     }
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: [request] });
     return { content: [{ type: "text", text: `${element_type} inserted at index ${index}.` }] };
-  });
+  }));
 
   server.tool("update_paragraph_style", "Update paragraph style (heading, list) in a Google Doc.", {
     document_id: z.string(),
@@ -183,7 +174,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     end_index: z.number(),
     style: z.enum(["NORMAL_TEXT", "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "TITLE", "SUBTITLE"]).optional(),
     list_type: z.enum(["BULLET", "NUMBERED", "none"]).optional(),
-  }, async ({ document_id, start_index, end_index, style, list_type }) => {
+  }, withErrorHandler(async ({ document_id, start_index, end_index, style, list_type }) => {
     const { accessToken } = await getCreds();
     const requests: any[] = [];
     if (style) {
@@ -197,34 +188,34 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     }
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
     return { content: [{ type: "text", text: `Paragraph style updated in range ${start_index}-${end_index}.` }] };
-  });
+  }));
 
   server.tool("batch_update_doc", "Execute multiple raw batchUpdate requests on a Google Doc.", {
     document_id: z.string(),
     requests: z.array(z.record(z.any())).describe("Array of Google Docs API batchUpdate request objects"),
-  }, async ({ document_id, requests }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, requests }) => {
     const { accessToken } = await getCreds();
     const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests }) as any;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations executed.` }] };
-  });
+  }));
 
   server.tool("export_doc_to_pdf", "Export a Google Doc to PDF (returns download URL).", {
     document_id: z.string(),
-  }, async ({ document_id }) => {
+  }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
+    await docsRequest(accessToken, document_id) as any;
     const exportUrl = `https://docs.google.com/document/d/${document_id}/export?format=pdf`;
     const resp = await fetch(exportUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
     const bytes = await resp.arrayBuffer();
     const sizeKb = Math.round(bytes.byteLength / 1024);
     return { content: [{ type: "text", text: `PDF export ready. Size: ${sizeKb} KB\nDirect download: ${exportUrl}\n(Note: requires authentication — add ?access_token=... or use Drive export API)` }] };
-  });
+  }));
 
   server.tool("inspect_doc_structure", "Inspect the structural elements of a Google Doc (indices, types). Supports tab_id for multi-tab documents — each tab has its own independent index space starting at 1.", {
     document_id: z.string(),
     tab_id: z.string().optional().describe("Tab ID to inspect. If omitted, inspects the default body. Get tab IDs from get_doc_tabs."),
-  }, async ({ document_id, tab_id }) => {
+  }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     const path = tab_id ? "?includeTabsContent=true" : "";
     const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
@@ -269,11 +260,11 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       i++;
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("list_document_comments", "List comments on a Google Doc.", {
     document_id: z.string(),
-  }, async ({ document_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments?fields=comments(id,author,content,createdTime,resolved,replies)&pageSize=100`, accessToken) as any;
     const comments = data.comments || [];
@@ -282,29 +273,29 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
       `ID: ${c.id}\nAuthor: ${c.author?.displayName}\nContent: ${c.content}\nCreated: ${c.createdTime}\nResolved: ${c.resolved || false}\nReplies: ${c.replies?.length || 0}`
     );
     return { content: [{ type: "text", text: lines.join("\n\n---\n\n") }] };
-  });
+  }));
 
   server.tool("add_document_comment", "Add a comment to a Google Doc.", {
     document_id: z.string(),
     content: z.string().describe("Comment text"),
-  }, async ({ document_id, content }) => {
+  }, withErrorHandler(async ({ document_id, content }) => {
     const { accessToken } = await getCreds();
     const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments`, accessToken, "POST", { content }) as any;
     return { content: [{ type: "text", text: `Comment added. ID: ${result.id}` }] };
-  });
+  }));
 
   server.tool("reply_to_document_comment", "Reply to an existing comment on a Google Doc.", {
     document_id: z.string(),
     comment_id: z.string(),
     reply_content: z.string(),
     resolve: z.boolean().optional().default(false),
-  }, async ({ document_id, comment_id, reply_content, resolve = false }) => {
+  }, withErrorHandler(async ({ document_id, comment_id, reply_content, resolve = false }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { content: reply_content };
     if (resolve) body.action = "resolve";
     const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments/${comment_id}/replies`, accessToken, "POST", body) as any;
     return { content: [{ type: "text", text: `Reply added. Reply ID: ${result.id}${resolve ? " | Comment resolved." : ""}` }] };
-  });
+  }));
 }
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
@@ -314,7 +305,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     query: z.string().describe("Text to search in document names"),
     max_results: z.number().optional().default(10),
     folder_id: z.string().optional().describe("Limit search to a specific folder"),
-  }, async ({ query, max_results = 10, folder_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, max_results = 10, folder_id }) => {
     const { accessToken } = await getCreds();
     let q = `mimeType='application/vnd.google-apps.document' and name contains '${query.replace(/'/g, "\\'")}' and trashed=false`;
     if (folder_id) q += ` and '${folder_id}' in parents`;
@@ -324,12 +315,12 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (!files.length) return { content: [{ type: "text", text: `No docs found for: "${query}"` }] };
     const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
     return { content: [{ type: "text", text: `Found ${files.length} docs:\n\n${lines.join("\n\n")}` }] };
-  });
+  }));
 
   server.tool("list_docs_in_folder", "List Google Docs in a specific Drive folder.", {
     folder_id: z.string().describe("Drive folder ID"),
     max_results: z.number().optional().default(20),
-  }, async ({ folder_id, max_results = 20 }) => {
+  }, withErrorHandler(async ({ folder_id, max_results = 20 }) => {
     const { accessToken } = await getCreds();
     const q = `mimeType='application/vnd.google-apps.document' and '${folder_id}' in parents and trashed=false`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
@@ -338,20 +329,18 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (!files.length) return { content: [{ type: "text", text: "No docs in this folder." }] };
     const lines = files.map((f: any) => `📄 ${f.name} | ID: ${f.id} | ${f.modifiedTime}`);
     return { content: [{ type: "text", text: `Docs in folder (${files.length}):\n${lines.join("\n")}` }] };
-  });
+  }));
 
   server.tool("update_doc_headers_footers", "Update the header or footer of a Google Doc.", {
     document_id: z.string(),
     text: z.string().describe("New text content for the header/footer"),
     target: z.enum(["header", "footer"]).default("header"),
     section_type: z.enum(["DEFAULT", "FIRST_PAGE", "EVEN_PAGE"]).optional().default("DEFAULT"),
-  }, async ({ document_id, text, target = "header", section_type = "DEFAULT" }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, text, target = "header", section_type = "DEFAULT" }) => {
     const { accessToken } = await getCreds();
     const doc = await docsRequest(accessToken, document_id) as any;
-    const sections = doc.documentStyle?.defaultHeaderId ? doc : null;
     const headerId = target === "header" ? doc.documentStyle?.defaultHeaderId : doc.documentStyle?.defaultFooterId;
     if (!headerId) {
-      // Create header/footer first via batchUpdate
       const createReq: Record<string, unknown> = target === "header"
         ? { createHeader: { type: section_type } }
         : { createFooter: { type: section_type } };
@@ -367,7 +356,6 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       }
       return { content: [{ type: "text", text: `Could not create ${target}.` }] };
     }
-    // Clear existing and insert new text
     const headerDoc = await docsRequest(accessToken, `${document_id}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as any;
     const segment = target === "header" ? headerDoc.headers?.[headerId] : headerDoc.footers?.[headerId];
     const endIndex = segment?.content?.slice(-1)[0]?.endIndex ?? 1;
@@ -376,24 +364,21 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     requests.push({ insertText: { location: { segmentId: headerId, index: 0 }, text } });
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
     return { content: [{ type: "text", text: `${target} updated to: "${text}"` }] };
-  });
+  }));
 
   server.tool("create_table_with_data", "Create a table populated with data in a Google Doc.", {
     document_id: z.string(),
     data: z.array(z.array(z.string())).describe("2D array — first row is headers, subsequent rows are data"),
     insertion_index: z.number().optional().default(1).describe("Index where table is inserted"),
-  }, async ({ document_id, data, insertion_index = 1 }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, data, insertion_index = 1 }) => {
     const { accessToken } = await getCreds();
     if (!data.length || !data[0].length) return { content: [{ type: "text", text: "No data provided." }] };
     const rows = data.length;
     const cols = data[0].length;
-    // Insert empty table
-    const createResult = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
       requests: [{ insertTable: { rows, columns: cols, location: { index: insertion_index } } }]
     }) as any;
-    // Re-fetch doc to get table structure and cell indices
     const doc = await docsRequest(accessToken, document_id) as any;
-    // Find the newly inserted table
     const tableElem = doc.body?.content?.find((e: any) => e.table && e.table.rows === rows && e.table.columns === cols);
     if (!tableElem) return { content: [{ type: "text", text: `Table created (${rows}×${cols}) but could not fill cells — do it manually via batch_update_doc.` }] };
     const insertRequests: any[] = [];
@@ -410,12 +395,12 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: insertRequests });
     }
     return { content: [{ type: "text", text: `Table ${rows}×${cols} created and filled with ${insertRequests.length} cells.` }] };
-  });
+  }));
 
   server.tool("debug_table_structure", "Debug: get detailed structure of tables in a Google Doc (indices, rows, cells).", {
     document_id: z.string(),
     max_tables: z.number().optional().default(3),
-  }, async ({ document_id, max_tables = 3 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, max_tables = 3 }) => {
     const { accessToken } = await getCreds();
     const doc = await docsRequest(accessToken, document_id) as any;
     const tables = (doc.body?.content || []).filter((e: any) => e.table);
@@ -433,16 +418,15 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("insert_doc_tab", "Insert (add) a new tab in a Google Doc. Returns the new tab ID. New tab is appended after existing tabs (Google API does not support specifying position).", {
     document_id: z.string(),
     title: z.string().describe("Tab title"),
     icon_emoji: z.string().optional().describe("Optional emoji icon, e.g. '📋', '✅', '📊'"),
     parent_tab_id: z.string().optional().describe("Parent tab ID to create a nested (child) tab"),
-  }, async ({ document_id, title, icon_emoji, parent_tab_id }) => {
+  }, withErrorHandler(async ({ document_id, title, icon_emoji, parent_tab_id }) => {
     const { accessToken } = await getCreds();
-    // addDocumentTab only accepts tabProperties — no other fields allowed
     const tabProperties: Record<string, unknown> = { title };
     if (icon_emoji) tabProperties.iconEmoji = icon_emoji;
     if (parent_tab_id) tabProperties.parentTabId = parent_tab_id;
@@ -456,25 +440,25 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (icon_emoji) lines.push(`Icon: ${icon_emoji}`);
     if (parent_tab_id) lines.push(`Parent tab: ${parent_tab_id}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("delete_doc_tab", "Delete a tab from a Google Doc.", {
     document_id: z.string(),
     tab_id: z.string().describe("Tab ID to delete"),
-  }, async ({ document_id, tab_id }) => {
+  }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
       requests: [{ deleteTab: { tabId: tab_id } }]
     });
     return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
-  });
+  }));
 
   server.tool("update_doc_tab", "Update properties of a Google Doc tab (title and/or emoji icon).", {
     document_id: z.string(),
     tab_id: z.string().describe("Tab ID to update"),
     title: z.string().optional().describe("New title for the tab"),
     icon_emoji: z.string().optional().describe("New emoji icon (e.g. '🎯'). Pass empty string to clear."),
-  }, async ({ document_id, tab_id, title, icon_emoji }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, tab_id, title, icon_emoji }) => {
     const { accessToken } = await getCreds();
     const tabProperties: Record<string, unknown> = { tabId: tab_id };
     const fields: string[] = [];
@@ -486,37 +470,18 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     });
     const updated = fields.map(f => f === "title" ? `title → "${title}"` : `emoji → "${icon_emoji}"`).join(", ");
     return { content: [{ type: "text", text: `Tab ${tab_id} updated: ${updated}` }] };
-  });
-
-  // ── Content Isolation Model (Google Docs Tabs) ──────────────────────────────
-  // • Each tab owns an INDEPENDENT index space starting at 1.
-  //   Index 1 in Tab A is completely separate from Index 1 in Tab B.
-  // • insertText / insertPerson / deleteContentRange all require tabId in
-  //   their location object when targeting a non-default tab.
-  // • endOfSegmentLocation: { tabId } is the safest way to append to a tab —
-  //   no need to compute the last endIndex manually.
-  // • GET document requires ?includeTabsContent=true to return tab body content.
-  //   Without it, tabs[] is present but documentTab.body is empty.
-  // • Deleting a parent tab cascades and deletes all its child tabs.
-  // • The first tab (index 0) cannot be deleted unless at least one other tab exists.
-  // ─────────────────────────────────────────────────────────────────────────────
+  }));
 
   server.tool("get_doc_tabs", "List all tabs in a Google Doc with their hierarchy, IDs, titles, and emoji icons.", {
     document_id: z.string(),
-  }, async ({ document_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    // includeTabsContent=false is enough for tab metadata — faster, smaller response
     const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=false") as any;
     const rootTabs: any[] = doc.tabs || [];
 
     interface TabInfo {
-      tab_id: string;
-      title: string;
-      index: number;
-      nested_level: number;
-      parent_tab_id: string | null;
-      icon_emoji: string | null;
-      child_count: number;
+      tab_id: string; title: string; index: number; nested_level: number;
+      parent_tab_id: string | null; icon_emoji: string | null; child_count: number;
     }
 
     function flattenTabs(tabList: any[], level = 0): TabInfo[] {
@@ -524,57 +489,33 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       for (const tab of tabList) {
         const p = tab.tabProperties || {};
         result.push({
-          tab_id: p.tabId ?? "",
-          title: p.title ?? "(Untitled)",
-          index: p.index ?? 0,
-          nested_level: level,
-          parent_tab_id: p.parentTabId ?? null,
-          icon_emoji: p.iconEmoji ?? null,
-          child_count: tab.childTabs?.length ?? 0,
+          tab_id: p.tabId ?? "", title: p.title ?? "(Untitled)", index: p.index ?? 0,
+          nested_level: level, parent_tab_id: p.parentTabId ?? null,
+          icon_emoji: p.iconEmoji ?? null, child_count: tab.childTabs?.length ?? 0,
         });
-        if (tab.childTabs?.length) {
-          result.push(...flattenTabs(tab.childTabs, level + 1));
-        }
+        if (tab.childTabs?.length) result.push(...flattenTabs(tab.childTabs, level + 1));
       }
       return result;
     }
 
     const tabs = flattenTabs(rootTabs);
-
     if (!tabs.length) {
-      return { content: [{ type: "text", text: JSON.stringify({
-        document_title: doc.title,
-        document_id,
-        tab_count: 0,
-        tabs: [],
-        note: "Document uses default single-tab layout — no named tabs.",
-      }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ document_title: doc.title, document_id, tab_count: 0, tabs: [], note: "Document uses default single-tab layout — no named tabs." }, null, 2) }] };
     }
-
-    return { content: [{ type: "text", text: JSON.stringify({
-      document_title: doc.title,
-      document_id,
-      tab_count: tabs.length,
-      tabs,
-    }, null, 2) }] };
-  });
-
-  // ─── Tab: Read content of a specific tab ─────────────────────────────────────
+    return { content: [{ type: "text", text: JSON.stringify({ document_title: doc.title, document_id, tab_count: tabs.length, tabs }, null, 2) }] };
+  }));
 
   server.tool("get_doc_tab_content", "Get the text content of a specific tab in a Google Doc.", {
     document_id: z.string(),
     tab_id: z.string().describe("Tab ID to read (get from get_doc_tabs)"),
-  }, async ({ document_id, tab_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=true") as any;
 
     function findTab(tabList: any[], id: string): any | null {
       for (const tab of tabList) {
         if (tab.tabProperties?.tabId === id) return tab;
-        if (tab.childTabs?.length) {
-          const found = findTab(tab.childTabs, id);
-          if (found) return found;
-        }
+        if (tab.childTabs?.length) { const found = findTab(tab.childTabs, id); if (found) return found; }
       }
       return null;
     }
@@ -583,11 +524,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
 
     const p = tab.tabProperties;
-    const lines: string[] = [
-      `Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}`,
-      `ID: ${tab_id}`,
-      "",
-    ];
+    const lines: string[] = [`Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}`, `ID: ${tab_id}`, ""];
 
     for (const elem of tab.documentTab?.body?.content || []) {
       if (!elem.paragraph) continue;
@@ -598,8 +535,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
           if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
           return "";
         })
-        .join("")
-        .trimEnd();
+        .join("").trimEnd();
       if (!text.trim()) continue;
       if (style === "HEADING_1") lines.push(`# ${text}`);
       else if (style === "HEADING_2") lines.push(`## ${text}`);
@@ -607,23 +543,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       else lines.push(text);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
-
-  // ─── @Mention Smart Chip ─────────────────────────────────────────────────────
-  //
-  // Core behavior of insertPerson:
-  //   • Always uses location: { index, tabId? } — NOT endOfSegmentLocation.
-  //     endOfSegmentLocation is unreliable for insertPerson (API inconsistency).
-  //   • When no index is given, the tool auto-fetches the document to find the
-  //     safe insertion point (last body endIndex - 1).
-  //   • prefix_text / suffix_text allow inserting context around the chip in a
-  //     single batchUpdate, avoiding the 2-step workaround of insertText + insertPerson.
-  //
-  // Index offset rule for batched requests:
-  //   When prefix_text is N chars long, the chip must be at (baseIndex + N).
-  //   Requests within one batchUpdate are applied sequentially, so indices
-  //   in later requests must account for text already inserted.
-  // ─────────────────────────────────────────────────────────────────────────────
+  }));
 
   server.tool("insert_person_mention",
     "Insert a @mention smart chip into a Google Doc. " +
@@ -634,33 +554,21 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       document_id: z.string(),
       email: z.string().describe("Google account email of the person to mention"),
       name: z.string().optional().describe("Display name for the chip. If omitted, email is displayed."),
-      index: z.number().optional().describe(
-        "Character index where the chip is inserted. " +
-        "If omitted, the tool auto-detects the safe end of the document body."
-      ),
+      index: z.number().optional().describe("Character index where the chip is inserted. If omitted, the tool auto-detects the safe end of the document body."),
       tab_id: z.string().optional().describe("Tab ID to insert into. Omit for default/single-tab docs."),
-      prefix_text: z.string().optional().describe(
-        "Text to insert immediately BEFORE the chip (e.g. 'Assigned to: '). " +
-        "Inserted in the same batchUpdate — no need for a separate insertText call."
-      ),
-      suffix_text: z.string().optional().describe(
-        "Text to insert immediately AFTER the chip (e.g. ' please review'). " +
-        "Inserted in the same batchUpdate."
-      ),
-    },
-    async ({ document_id, email, name, index, tab_id, prefix_text, suffix_text }) => {
+      prefix_text: z.string().optional().describe("Text to insert immediately BEFORE the chip."),
+      suffix_text: z.string().optional().describe("Text to insert immediately AFTER the chip."),
+    }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, email, name, index, tab_id, prefix_text, suffix_text }) => {
       const { accessToken } = await getCreds();
 
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return { content: [{ type: "text", text: `Invalid email format: "${email}"` }] };
       }
 
-      // ── Auto-detect insertion index if not provided ──────────────────────────
       let baseIndex = index;
       if (baseIndex === undefined) {
         const path = tab_id ? "?includeTabsContent=true" : "";
         const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
-
         if (tab_id) {
           function findTab(tabList: any[], id: string): any | null {
             for (const tab of tabList) {
@@ -681,9 +589,6 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         }
       }
 
-      // ── Build batched requests ───────────────────────────────────────────────
-      // All indices are calculated relative to baseIndex, accounting for the
-      // sequential application of requests within one batchUpdate.
       const requests: any[] = [];
       let chipIndex = baseIndex;
 
@@ -691,7 +596,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         const loc: Record<string, unknown> = { index: baseIndex };
         if (tab_id) loc.tabId = tab_id;
         requests.push({ insertText: { location: loc, text: prefix_text } });
-        chipIndex = baseIndex + prefix_text.length; // chip goes after prefix
+        chipIndex = baseIndex + prefix_text.length;
       }
 
       const chipLoc: Record<string, unknown> = { index: chipIndex };
@@ -701,7 +606,6 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       requests.push({ insertPerson: { personProperties, location: chipLoc } });
 
       if (suffix_text) {
-        // chip occupies 1 index position; suffix goes right after
         const suffixLoc: Record<string, unknown> = { index: chipIndex + 1 };
         if (tab_id) suffixLoc.tabId = tab_id;
         requests.push({ insertText: { location: suffixLoc, text: suffix_text } });
@@ -716,27 +620,22 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       if (tab_id) parts.push(`Tab: ${tab_id}`);
       parts.push("Note: Notifications only fire if the person has access to the document.");
       return { content: [{ type: "text", text: parts.join("\n") }] };
-    }
-  );
-
-  // ─── @Mention: Batch insert multiple chips on a new line ──────────────────
+    }));
 
   server.tool("insert_multiple_mentions",
     "Insert multiple @mention smart chips in one batch operation. " +
-    "Each mention is appended as a new line: '[prefix] [chip] [suffix]'. " +
-    "All chips are real Google smart chips, not plain text. " +
+    "Each mention is appended as a new line. All chips are real Google smart chips. " +
     "The tool auto-detects the end of the document — no need to compute indices manually.",
     {
       document_id: z.string(),
       mentions: z.array(z.object({
-        email: z.string().describe("Google account email"),
-        name: z.string().optional().describe("Display name"),
-        prefix_text: z.string().optional().describe("Text before the chip on the same line, e.g. '- Assigned: '"),
-        suffix_text: z.string().optional().describe("Text after the chip on the same line"),
-      })).describe("List of people to mention. Each gets their own line appended to the document."),
+        email: z.string(),
+        name: z.string().optional(),
+        prefix_text: z.string().optional(),
+        suffix_text: z.string().optional(),
+      })).describe("List of people to mention. Each gets their own line."),
       tab_id: z.string().optional().describe("Tab ID to append into. Omit for default tab."),
-    },
-    async ({ document_id, mentions, tab_id }) => {
+    }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, mentions, tab_id }) => {
       const { accessToken } = await getCreds();
 
       const invalid = mentions.filter(m => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email));
@@ -744,7 +643,6 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         return { content: [{ type: "text", text: `Invalid email(s): ${invalid.map(m => m.email).join(", ")}` }] };
       }
 
-      // Fetch current doc end index once
       const path = tab_id ? "?includeTabsContent=true" : "";
       const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
 
@@ -768,31 +666,27 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
       }
 
-      // Build all requests, tracking running offset caused by each insertion
       const requests: any[] = [];
-      let offset = 0; // cumulative chars inserted so far in this batch
+      let offset = 0;
 
       for (const m of mentions) {
         const lineStart = baseIndex + offset;
         const prefix = "\n" + (m.prefix_text || "");
         const suffix = m.suffix_text || "";
 
-        // 1. Insert newline + prefix text
         const prefixLoc: Record<string, unknown> = { index: lineStart };
         if (tab_id) prefixLoc.tabId = tab_id;
         requests.push({ insertText: { location: prefixLoc, text: prefix } });
         offset += prefix.length;
 
-        // 2. Insert the smart chip
         const chipIdx = baseIndex + offset;
         const chipLoc: Record<string, unknown> = { index: chipIdx };
         if (tab_id) chipLoc.tabId = tab_id;
         const personProperties: Record<string, unknown> = { email: m.email };
         if (m.name) personProperties.name = m.name;
         requests.push({ insertPerson: { personProperties, location: chipLoc } });
-        offset += 1; // chip occupies exactly 1 index position
+        offset += 1;
 
-        // 3. Insert suffix text
         if (suffix) {
           const suffixLoc: Record<string, unknown> = { index: baseIndex + offset };
           if (tab_id) suffixLoc.tabId = tab_id;
@@ -808,6 +702,5 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         return `  • ${line}`;
       }).join("\n");
       return { content: [{ type: "text", text: `${mentions.length} smart chip(s) inserted:\n${summary}` }] };
-    }
-  );
+    }));
 }

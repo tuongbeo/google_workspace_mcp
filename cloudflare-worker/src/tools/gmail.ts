@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { gmailRequest } from "../google";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -33,7 +34,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     query: z.string().describe("Gmail query, e.g. 'from:boss@company.com is:unread'"),
     page_size: z.number().optional().default(10),
     page_token: z.string().optional(),
-  }, async ({ query, page_size = 10, page_token }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 10, page_token }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ q: query, maxResults: String(Math.min(page_size, 50)) });
     if (page_token) params.set("pageToken", page_token);
@@ -44,22 +45,22 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     for (const m of messages) lines.push(`ID: ${m.id} | Thread: ${m.threadId} | https://mail.google.com/mail/u/0/#all/${m.id}`);
     if (data.nextPageToken) lines.push(`\nNext page token: ${data.nextPageToken}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("get_gmail_message_content", "Get full content of a Gmail message by ID.", {
     message_id: z.string(),
-  }, async ({ message_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ message_id }) => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, `/messages/${message_id}?format=full`) as any;
     const hdrs: Record<string, string> = {};
     for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
     const body = extractBody(data.payload);
     return { content: [{ type: "text", text: [`Subject: ${hdrs.subject || "(none)"}`, `From: ${hdrs.from || "?"}`, `To: ${hdrs.to || ""}`, `Date: ${hdrs.date || ""}`, `Labels: ${(data.labelIds || []).join(", ")}`, "", "--- BODY ---", body || "[No readable content]"].join("\n") }] };
-  });
+  }));
 
   server.tool("get_gmail_messages_content_batch", "Batch-retrieve full content of multiple Gmail messages.", {
     message_ids: z.array(z.string()).describe("List of message IDs (max 20)"),
-  }, async ({ message_ids }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ message_ids }) => {
     const { accessToken } = await getCreds();
     const results: string[] = [];
     for (const id of message_ids.slice(0, 20)) {
@@ -71,11 +72,11 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
       } catch (e) { results.push(`=== Message ${id} === ERROR: ${e}`); }
     }
     return { content: [{ type: "text", text: results.join("\n\n") }] };
-  });
+  }));
 
   server.tool("get_gmail_thread_content", "Get all messages in a Gmail thread.", {
     thread_id: z.string(),
-  }, async ({ thread_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ thread_id }) => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, `/threads/${thread_id}?format=full`) as any;
     const messages = data.messages || [];
@@ -90,7 +91,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("send_gmail_message", "Send an email using Gmail.", {
     to: z.string(),
@@ -100,7 +101,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     bcc: z.string().optional(),
     in_reply_to_message_id: z.string().optional(),
     html: z.boolean().optional().default(false).describe("Set true to send HTML body"),
-  }, async ({ to, subject, body, cc, bcc, in_reply_to_message_id, html = false }) => {
+  }, withErrorHandler(async ({ to, subject, body, cc, bcc, in_reply_to_message_id, html = false }) => {
     const { accessToken } = await getCreds();
     const contentType = html ? "text/html" : "text/plain";
     let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: ${contentType}; charset=utf-8`;
@@ -114,27 +115,27 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     }
     const result = await gmailRequest(accessToken, "/messages/send", "POST", payload) as any;
     return { content: [{ type: "text", text: `Email sent! Message ID: ${result.id}` }] };
-  });
+  }));
 
   server.tool("create_gmail_draft", "Create a Gmail draft.", {
     to: z.string(),
     subject: z.string(),
     body: z.string(),
     cc: z.string().optional(),
-  }, async ({ to, subject, body, cc }) => {
+  }, withErrorHandler(async ({ to, subject, body, cc }) => {
     const { accessToken } = await getCreds();
     let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8`;
     if (cc) headers += `\r\nCc: ${cc}`;
     const result = await gmailRequest(accessToken, "/drafts", "POST", { message: { raw: encodeEmail(headers, body) } }) as any;
     return { content: [{ type: "text", text: `Draft created! Draft ID: ${result.id}` }] };
-  });
+  }));
 
-  server.tool("list_gmail_labels", "List all Gmail labels.", {}, async () => {
+  server.tool("list_gmail_labels", "List all Gmail labels.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, "/labels") as any;
     const labels = (data.labels || []).map((l: any) => `- ${l.name} (ID: ${l.id}, type: ${l.type})`).join("\n");
     return { content: [{ type: "text", text: `Gmail Labels:\n${labels}` }] };
-  });
+  }));
 
   server.tool("manage_gmail_label", "Create, update, or delete a Gmail label.", {
     action: z.enum(["create", "update", "delete"]),
@@ -142,7 +143,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     name: z.string().optional().describe("Label name (required for create/update)"),
     message_list_visibility: z.enum(["show", "hide"]).optional(),
     label_list_visibility: z.enum(["labelShow", "labelShowIfUnread", "labelHide"]).optional(),
-  }, async ({ action, label_id, name, message_list_visibility, label_list_visibility }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ action, label_id, name, message_list_visibility, label_list_visibility }) => {
     const { accessToken } = await getCreds();
     if (action === "create") {
       const body: Record<string, unknown> = { name };
@@ -161,36 +162,36 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
       await gmailRequest(accessToken, `/labels/${label_id}`, "DELETE");
       return { content: [{ type: "text", text: `Label ${label_id} deleted.` }] };
     }
-  });
+  }));
 
   server.tool("modify_gmail_message", "Modify Gmail message labels (mark read, archive, trash, etc.).", {
     message_id: z.string(),
     add_labels: z.array(z.string()).optional(),
     remove_labels: z.array(z.string()).optional(),
-  }, async ({ message_id, add_labels = [], remove_labels = [] }) => {
+  }, withErrorHandler(async ({ message_id, add_labels = [], remove_labels = [] }) => {
     const { accessToken } = await getCreds();
     await gmailRequest(accessToken, `/messages/${message_id}/modify`, "POST", { addLabelIds: add_labels, removeLabelIds: remove_labels });
     return { content: [{ type: "text", text: `Message ${message_id} labels updated.` }] };
-  });
+  }));
 
   server.tool("batch_modify_gmail_message_labels", "Batch modify labels on multiple Gmail messages.", {
     message_ids: z.array(z.string()),
     add_labels: z.array(z.string()).optional(),
     remove_labels: z.array(z.string()).optional(),
-  }, async ({ message_ids, add_labels = [], remove_labels = [] }) => {
+  }, withErrorHandler(async ({ message_ids, add_labels = [], remove_labels = [] }) => {
     const { accessToken } = await getCreds();
     await gmailRequest(accessToken, "/messages/batchModify", "POST", { ids: message_ids, addLabelIds: add_labels, removeLabelIds: remove_labels });
     return { content: [{ type: "text", text: `Batch modified ${message_ids.length} messages.` }] };
-  });
+  }));
 
   server.tool("get_gmail_attachment", "Download a Gmail message attachment (returns base64 content).", {
     message_id: z.string(),
     attachment_id: z.string(),
-  }, async ({ message_id, attachment_id }) => {
+  }, withErrorHandler(async ({ message_id, attachment_id }) => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, `/messages/${message_id}/attachments/${attachment_id}`) as any;
     return { content: [{ type: "text", text: `Attachment size: ${data.size} bytes\nData (base64): ${(data.data || "").substring(0, 200)}...` }] };
-  });
+  }));
 }
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
@@ -198,7 +199,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
 export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_gmail_threads_content_batch", "Batch-retrieve full content of multiple Gmail threads.", {
     thread_ids: z.array(z.string()).describe("List of thread IDs (max 10)"),
-  }, async ({ thread_ids }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ thread_ids }) => {
     const { accessToken } = await getCreds();
     const results: string[] = [];
     for (const id of thread_ids.slice(0, 10)) {
@@ -214,9 +215,9 @@ export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFun
       } catch (e) { results.push(`=== Thread ${id} === ERROR: ${e}`); }
     }
     return { content: [{ type: "text", text: results.join("\n\n") }] };
-  });
+  }));
 
-  server.tool("list_gmail_filters", "List all Gmail filters configured for the account.", {}, async () => {
+  server.tool("list_gmail_filters", "List all Gmail filters configured for the account.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, "/settings/filters") as any;
     const filters = data.filter || [];
@@ -229,7 +230,7 @@ export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFun
       return `ID: ${f.id}\n  Match: ${c || "(any)"}\n  Action: ${a || "(none)"}`;
     });
     return { content: [{ type: "text", text: `Gmail Filters (${filters.length}):\n\n${lines.join("\n\n")}` }] };
-  });
+  }));
 
   server.tool("manage_gmail_filter", "Create or delete a Gmail filter.", {
     action: z.enum(["create", "delete"]),
@@ -243,7 +244,7 @@ export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFun
     forward_to: z.string().optional(),
     mark_as_read: z.boolean().optional(),
     archive: z.boolean().optional(),
-  }, async ({ action, filter_id, from, to, subject, query, add_label_ids, remove_label_ids, forward_to, mark_as_read, archive }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ action, filter_id, from, to, subject, query, add_label_ids, remove_label_ids, forward_to, mark_as_read, archive }) => {
     const { accessToken } = await getCreds();
     if (action === "delete") {
       await gmailRequest(accessToken, `/settings/filters/${filter_id}`, "DELETE");
@@ -264,5 +265,5 @@ export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFun
     if (forward_to) actionObj.forward = forward_to;
     const result = await gmailRequest(accessToken, "/settings/filters", "POST", { criteria, action: actionObj }) as any;
     return { content: [{ type: "text", text: `Filter created. ID: ${result.id}` }] };
-  });
+  }));
 }

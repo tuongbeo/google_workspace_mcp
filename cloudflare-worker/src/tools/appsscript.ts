@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { googleFetch } from "../google";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -13,7 +14,7 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
 
   server.tool("list_script_projects", "List Google Apps Script projects accessible to the user.", {
     page_size: z.number().optional().default(20),
-  }, async ({ page_size = 20 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ page_size = 20 }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ mimeType: "application/vnd.google-apps.script", pageSize: String(page_size), fields: "files(id,name,modifiedTime,webViewLink)" });
     const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
@@ -21,11 +22,11 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
     if (!files.length) return { content: [{ type: "text", text: "No Apps Script projects found." }] };
     const lines = files.map((f: any) => `- ${f.name}\n  ID: ${f.id}\n  Modified: ${f.modifiedTime}\n  Link: ${f.webViewLink}`);
     return { content: [{ type: "text", text: `Apps Script Projects (${files.length}):\n\n${lines.join("\n\n")}` }] };
-  });
+  }));
 
   server.tool("get_script_project", "Get a Google Apps Script project with all its files.", {
     script_id: z.string().describe("Script project ID (from Drive file ID)"),
-  }, async ({ script_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
     const lines = [`Script ID: ${script_id}`, `Files: ${(data.files || []).length}`, ""];
@@ -35,29 +36,29 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("get_script_content", "Get content of a specific file in an Apps Script project.", {
     script_id: z.string(),
     file_name: z.string().describe("File name (without extension)"),
-  }, async ({ script_id, file_name }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, file_name }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
     const file = (data.files || []).find((f: any) => f.name === file_name);
     if (!file) return { content: [{ type: "text", text: `File "${file_name}" not found in project.` }] };
     return { content: [{ type: "text", text: `${file.name} (${file.type}):\n\n${file.source || ""}` }] };
-  });
+  }));
 
   server.tool("create_script_project", "Create a new Google Apps Script project.", {
     title: z.string(),
     parent_id: z.string().optional().describe("Parent Drive file ID to bind to (e.g., Sheets/Docs ID)"),
-  }, async ({ title, parent_id }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ title, parent_id }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { title };
     if (parent_id) body.parentId = parent_id;
     const result = await googleFetch(`${SCRIPT_BASE}/projects`, accessToken, "POST", body) as any;
     return { content: [{ type: "text", text: `Script project created: "${result.title}"\nID: ${result.scriptId}\nURL: https://script.google.com/d/${result.scriptId}/edit` }] };
-  });
+  }));
 
   server.tool("update_script_content", "Create or update files in a Google Apps Script project.", {
     script_id: z.string(),
@@ -66,12 +67,10 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
       type: z.enum(["SERVER_JS", "HTML", "JSON"]).optional().default("SERVER_JS"),
       source: z.string(),
     })).describe("Files to write (replaces existing files with same name)"),
-  }, async ({ script_id, files }) => {
+  }, withErrorHandler(async ({ script_id, files }) => {
     const { accessToken } = await getCreds();
-    // Fetch existing files first
     const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
     const existingFiles = existing.files || [];
-    // Merge: replace or add
     const merged = [...existingFiles];
     for (const newFile of files) {
       const idx = merged.findIndex((f: any) => f.name === newFile.name);
@@ -80,14 +79,14 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
     }
     await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken, "PUT", { files: merged });
     return { content: [{ type: "text", text: `Updated ${files.length} file(s) in script project ${script_id}.` }] };
-  });
+  }));
 
   server.tool("run_script_function", "Execute a function in a Google Apps Script project.", {
     script_id: z.string(),
     function_name: z.string(),
     parameters: z.array(z.any()).optional().default([]).describe("Function parameters"),
     dev_mode: z.boolean().optional().default(false).describe("Run latest saved version (dev mode)"),
-  }, async ({ script_id, function_name, parameters = [], dev_mode = false }) => {
+  }, withErrorHandler(async ({ script_id, function_name, parameters = [], dev_mode = false }) => {
     const { accessToken } = await getCreds();
     const result = await googleFetch(`${SCRIPT_BASE}/scripts/${script_id}:run`, accessToken, "POST", {
       function: function_name, parameters, devMode: dev_mode,
@@ -98,11 +97,11 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
     }
     const returnVal = result.response?.result;
     return { content: [{ type: "text", text: `Function "${function_name}" executed successfully.\nReturn value: ${JSON.stringify(returnVal, null, 2)}` }] };
-  });
+  }));
 
   server.tool("list_script_deployments", "List deployments of a Google Apps Script project.", {
     script_id: z.string(),
-  }, async ({ script_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken) as any;
     const deployments = data.deployments || [];
@@ -111,49 +110,49 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
       `- ID: ${d.deploymentId}\n  Config: ${d.deploymentConfig?.description || "N/A"}\n  Version: ${d.deploymentConfig?.versionNumber || "HEAD"}\n  Updated: ${d.updateTime}`
     );
     return { content: [{ type: "text", text: `Deployments (${deployments.length}):\n\n${lines.join("\n\n")}` }] };
-  });
+  }));
 
   server.tool("create_script_deployment", "Create a new deployment for a Google Apps Script project.", {
     script_id: z.string(),
     version_number: z.number().optional().describe("Version to deploy (omit for HEAD/latest)"),
     description: z.string().optional(),
     manifest_file_name: z.string().optional().default("appsscript"),
-  }, async ({ script_id, version_number, description, manifest_file_name = "appsscript" }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ script_id, version_number, description, manifest_file_name = "appsscript" }) => {
     const { accessToken } = await getCreds();
     const config: Record<string, unknown> = { manifestFileName: manifest_file_name };
     if (version_number) config.versionNumber = version_number;
     if (description) config.description = description;
     const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken, "POST", { deploymentConfig: config }) as any;
     return { content: [{ type: "text", text: `Deployment created.\nID: ${result.deploymentId}\nUpdated: ${result.updateTime}` }] };
-  });
+  }));
 
   server.tool("update_script_deployment", "Update an existing Apps Script deployment.", {
     script_id: z.string(),
     deployment_id: z.string(),
     version_number: z.number().optional(),
     description: z.string().optional(),
-  }, async ({ script_id, deployment_id, version_number, description }) => {
+  }, withErrorHandler(async ({ script_id, deployment_id, version_number, description }) => {
     const { accessToken } = await getCreds();
     const config: Record<string, unknown> = {};
     if (version_number) config.versionNumber = version_number;
     if (description) config.description = description;
-    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "PUT", { deploymentConfig: config }) as any;
+    await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "PUT", { deploymentConfig: config }) as any;
     return { content: [{ type: "text", text: `Deployment ${deployment_id} updated.` }] };
-  });
+  }));
 
   server.tool("delete_script_deployment", "Delete an Apps Script deployment.", {
     script_id: z.string(),
     deployment_id: z.string(),
-  }, async ({ script_id, deployment_id }) => {
+  }, withErrorHandler(async ({ script_id, deployment_id }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Deployment ${deployment_id} deleted.` }] };
-  });
+  }));
 
   server.tool("list_script_processes", "List recent execution processes for a Google Apps Script project.", {
     script_id: z.string().optional().describe("Filter by script ID"),
     page_size: z.number().optional().default(20),
-  }, async ({ script_id, page_size = 20 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, page_size = 20 }) => {
     const { accessToken } = await getCreds();
     const params: Record<string, string> = { pageSize: String(page_size) };
     if (script_id) params["userProcessFilter.scriptId"] = script_id;
@@ -165,7 +164,7 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
       `- Function: ${p.functionName || "N/A"}\n  Status: ${p.processStatus}\n  Type: ${p.processType}\n  Start: ${p.startTime}\n  Duration: ${p.duration || "N/A"}`
     );
     return { content: [{ type: "text", text: `Processes (${processes.length}):\n\n${lines.join("\n\n")}` }] };
-  });
+  }));
 }
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
@@ -174,48 +173,47 @@ export function registerAppsScriptExtraTools(server: McpServer, getCreds: GetCre
   server.tool("create_script_version", "Create a versioned snapshot of a Google Apps Script project.", {
     script_id: z.string(),
     description: z.string().optional().describe("Version description"),
-  }, async ({ script_id, description }) => {
+  }, withErrorHandler(async ({ script_id, description }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = {};
     if (description) body.description = description;
     const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions`, accessToken, "POST", body) as any;
     return { content: [{ type: "text", text: `Version created.\nNumber: ${result.versionNumber}\nDescription: ${result.description || "N/A"}\nCreated: ${result.createTime}` }] };
-  });
+  }));
 
   server.tool("get_script_version", "Get details of a specific version of a Google Apps Script project.", {
     script_id: z.string(),
     version_number: z.number(),
-  }, async ({ script_id, version_number }) => {
+  }, withErrorHandler(async ({ script_id, version_number }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions/${version_number}`, accessToken) as any;
     return { content: [{ type: "text", text: `Version ${data.versionNumber}\nScript ID: ${data.scriptId}\nDescription: ${data.description || "N/A"}\nCreated: ${data.createTime}` }] };
-  });
+  }));
 
   server.tool("list_script_versions", "List all versions of a Google Apps Script project.", {
     script_id: z.string(),
     page_size: z.number().optional().default(20),
-  }, async ({ script_id, page_size = 20 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, page_size = 20 }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions?pageSize=${page_size}`, accessToken) as any;
     const versions = data.versions || [];
     if (!versions.length) return { content: [{ type: "text", text: "No versions found." }] };
     const lines = versions.map((v: any) => `v${v.versionNumber}: ${v.description || "(no description)"} | ${v.createTime}`);
     return { content: [{ type: "text", text: `Versions (${versions.length}):\n${lines.join("\n")}` }] };
-  });
+  }));
 
   server.tool("delete_script_project", "Delete a Google Apps Script project.", {
     script_id: z.string().describe("Script project ID (Drive file ID)"),
-  }, async ({ script_id }) => {
+  }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
-    // Apps Script projects are Drive files — delete via Drive API
     await googleFetch(`https://www.googleapis.com/drive/v3/files/${script_id}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Script project ${script_id} deleted (moved to Trash).` }] };
-  });
+  }));
 
   server.tool("get_script_metrics", "Get execution metrics for a Google Apps Script project.", {
     script_id: z.string(),
     metrics_granularity: z.enum(["UNSPECIFIED_GRANULARITY", "WEEKLY", "DAILY"]).optional().default("WEEKLY"),
-  }, async ({ script_id, metrics_granularity = "WEEKLY" }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, metrics_granularity = "WEEKLY" }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ metricsGranularity: metrics_granularity });
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/metrics?${params}`, accessToken) as any;
@@ -225,5 +223,5 @@ export function registerAppsScriptExtraTools(server: McpServer, getCreds: GetCre
     if (data.totalExecutions) lines.push(`Total executions: ${JSON.stringify(data.totalExecutions)}`);
     if (!data.activeUsers && !data.totalExecutions) lines.push("No metrics data available.");
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 }

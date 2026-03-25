@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { googleFetch } from "../google";
+import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -15,7 +16,7 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
   server.tool("list_contacts", "List Google Contacts.", {
     page_size: z.number().optional().default(20),
     query: z.string().optional(),
-  }, async ({ page_size = 20, query }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ page_size = 20, query }) => {
     const { accessToken } = await getCreds();
     let url: string;
     if (query) {
@@ -34,12 +35,12 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
       return `- ${name}${email ? " | " + email : ""}${phone ? " | " + phone : ""} | ${rn}`;
     });
     return { content: [{ type: "text", text: `Contacts (${contacts.length}):\n${lines.join("\n")}` }] };
-  });
+  }));
 
   server.tool("search_contacts", "Search Google Contacts by name, email, or phone.", {
     query: z.string(),
     page_size: z.number().optional().default(10),
-  }, async ({ query, page_size = 10 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 10 }) => {
     const { accessToken } = await getCreds();
     const url = `${PEOPLE_BASE}/people:searchContacts?query=${encodeURIComponent(query)}&readMask=${FIELDS}&pageSize=${page_size}`;
     const data = await googleFetch(url, accessToken) as any;
@@ -47,15 +48,15 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
     if (!contacts.length) return { content: [{ type: "text", text: `No contacts found for: "${query}"` }] };
     const lines = contacts.map((c: any) => formatContact(c));
     return { content: [{ type: "text", text: lines.join("\n\n---\n\n") }] };
-  });
+  }));
 
   server.tool("get_contact", "Get detailed info of a specific Google Contact.", {
     resource_name: z.string().describe("Contact resource name, e.g. 'people/c123456'"),
-  }, async ({ resource_name }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ resource_name }) => {
     const { accessToken } = await getCreds();
     const contact = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as any;
     return { content: [{ type: "text", text: formatContact(contact) }] };
-  });
+  }));
 
   server.tool("create_contact", "Create a new Google Contact.", {
     first_name: z.string(),
@@ -65,7 +66,7 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
     company: z.string().optional(),
     job_title: z.string().optional(),
     notes: z.string().optional(),
-  }, async ({ first_name, last_name, email, phone, company, job_title, notes }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ first_name, last_name, email, phone, company, job_title, notes }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { names: [{ givenName: first_name, familyName: last_name || "" }] };
     if (email) body.emailAddresses = [{ value: email }];
@@ -74,7 +75,7 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
     if (notes) body.biographies = [{ value: notes }];
     const result = await googleFetch(`${PEOPLE_BASE}/people:createContact`, accessToken, "POST", body) as any;
     return { content: [{ type: "text", text: `Contact created: "${result.names?.[0]?.displayName}"\nResource: ${result.resourceName}` }] };
-  });
+  }));
 
   server.tool("update_contact", "Update a Google Contact.", {
     resource_name: z.string(),
@@ -85,7 +86,7 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
     company: z.string().optional(),
     job_title: z.string().optional(),
     notes: z.string().optional(),
-  }, async ({ resource_name, first_name, last_name, email, phone, company, job_title, notes }) => {
+  }, withErrorHandler(async ({ resource_name, first_name, last_name, email, phone, company, job_title, notes }) => {
     const { accessToken } = await getCreds();
     const existing = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as any;
     const body: Record<string, unknown> = { etag: existing.etag };
@@ -101,62 +102,62 @@ export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc)
     if (notes !== undefined) { body.biographies = [{ value: notes }]; updateFields.push("biographies"); }
     const result = await googleFetch(`${PEOPLE_BASE}/${resource_name}:updateContact?updatePersonFields=${updateFields.join(",")}`, accessToken, "PATCH", body) as any;
     return { content: [{ type: "text", text: `Contact updated: "${result.names?.[0]?.displayName}"` }] };
-  });
+  }));
 
   server.tool("delete_contact", "Delete a Google Contact.", {
     resource_name: z.string(),
-  }, async ({ resource_name }) => {
+  }, withErrorHandler(async ({ resource_name }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`${PEOPLE_BASE}/${resource_name}:deleteContact`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Contact ${resource_name} deleted.` }] };
-  });
+  }));
 
-  server.tool("list_contact_groups", "List Google Contact groups/labels.", {}, async () => {
+  server.tool("list_contact_groups", "List Google Contact groups/labels.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${PEOPLE_BASE}/contactGroups?pageSize=50`, accessToken) as any;
     const groups = (data.contactGroups || []).map((g: any) => `- ${g.name} (${g.groupType}) | ID: ${g.resourceName} | Members: ${g.memberCount || 0}`);
     return { content: [{ type: "text", text: `Contact Groups:\n${groups.join("\n")}` }] };
-  });
+  }));
 
   server.tool("get_contact_group", "Get details of a contact group with its members.", {
     resource_name: z.string().describe("Group resource name, e.g. 'contactGroups/123'"),
     max_members: z.number().optional().default(50),
-  }, async ({ resource_name, max_members = 50 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ resource_name, max_members = 50 }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${PEOPLE_BASE}/${resource_name}?maxMembers=${max_members}`, accessToken) as any;
     const lines = [`Group: ${data.name}`, `Type: ${data.groupType}`, `Members: ${data.memberCount || 0}`, `Resource: ${data.resourceName}`];
     if (data.memberResourceNames?.length) lines.push(`\nMember resources:\n${data.memberResourceNames.join("\n")}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
-  });
+  }));
 
   server.tool("create_contact_group", "Create a new Google Contact group.", {
     name: z.string(),
-  }, async ({ name }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ name }) => {
     const { accessToken } = await getCreds();
     const result = await googleFetch(`${PEOPLE_BASE}/contactGroups`, accessToken, "POST", { contactGroup: { name } }) as any;
     return { content: [{ type: "text", text: `Group created: "${result.name}" (${result.resourceName})` }] };
-  });
+  }));
 
   server.tool("delete_contact_group", "Delete a Google Contact group.", {
     resource_name: z.string(),
     delete_contacts: z.boolean().optional().default(false).describe("Also delete all contacts in the group"),
-  }, async ({ resource_name, delete_contacts = false }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ resource_name, delete_contacts = false }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`${PEOPLE_BASE}/${resource_name}?deleteContacts=${delete_contacts}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Group ${resource_name} deleted.` }] };
-  });
+  }));
 
   server.tool("modify_contact_group_members", "Add or remove contacts from a group.", {
     resource_name: z.string().describe("Group resource name"),
     add_resource_names: z.array(z.string()).optional().describe("Contact resource names to add"),
     remove_resource_names: z.array(z.string()).optional().describe("Contact resource names to remove"),
-  }, async ({ resource_name, add_resource_names = [], remove_resource_names = [] }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ resource_name, add_resource_names = [], remove_resource_names = [] }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`${PEOPLE_BASE}/${resource_name}/members:modify`, accessToken, "POST", {
       resourceNamesToAdd: add_resource_names, resourceNamesToRemove: remove_resource_names,
     });
     return { content: [{ type: "text", text: `Group members modified. Added: ${add_resource_names.length}, Removed: ${remove_resource_names.length}` }] };
-  });
+  }));
 }
 
 function formatContact(c: any): string {
@@ -188,7 +189,7 @@ export function registerContactsExtraTools(server: McpServer, getCreds: GetCreds
       phone: z.string().optional(),
       company: z.string().optional(),
     })).describe("List of contacts to process (max 50)"),
-  }, async ({ action, contacts }) => {
+  }, { readOnlyHint: false }, withErrorHandler(async ({ action, contacts }) => {
     const { accessToken } = await getCreds();
     const results: string[] = [];
 
@@ -231,5 +232,5 @@ export function registerContactsExtraTools(server: McpServer, getCreds: GetCreds
     }
 
     return { content: [{ type: "text", text: `Batch ${action} results:\n${results.join("\n")}` }] };
-  });
+  }));
 }

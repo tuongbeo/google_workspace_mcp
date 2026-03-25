@@ -40,13 +40,17 @@ app.get("/health", (c) =>
 );
 
 // ── OAuth Discovery ───────────────────────────────────────────────────────────
-app.get("/.well-known/oauth-authorization-server", (c) =>
-  c.json(buildOAuthMetadata(c.env.PUBLIC_BASE_URL))
-);
+app.get("/.well-known/oauth-authorization-server", (c) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json(buildOAuthMetadata(c.env.PUBLIC_BASE_URL));
+});
 
-app.get("/.well-known/oauth-protected-resource", (c) =>
-  c.json(buildResourceMetadata(c.env.PUBLIC_BASE_URL))
-);
+app.get("/.well-known/oauth-protected-resource", (c) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json(buildResourceMetadata(c.env.PUBLIC_BASE_URL));
+});
 
 // ── Dynamic Client Registration ───────────────────────────────────────────────
 app.post("/register", async (c) => handleDCR(c.req.raw, c.env));

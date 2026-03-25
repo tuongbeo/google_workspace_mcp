@@ -98,6 +98,20 @@ export async function sheetsRequest(
   return googleFetch(`${SHEETS_BASE}/${spreadsheetId}${path}`, accessToken, method, body);
 }
 
+// ── Google Slides API ─────────────────────────────────────────────────────────
+
+const SLIDES_BASE = "https://slides.googleapis.com/v1/presentations";
+
+export async function slidesRequest(
+  accessToken: string,
+  presentationId: string,
+  endpoint: string,  // "" | ":batchUpdate" | "/pages/{pageId}" | "/pages/{pageId}/thumbnail"
+  method = "GET",
+  body?: unknown
+): Promise<unknown> {
+  return googleFetch(`${SLIDES_BASE}/${presentationId}${endpoint}`, accessToken, method, body);
+}
+
 // ── Google Apps Script API ────────────────────────────────────────────────────
 
 const APPSSCRIPT_BASE = "https://script.googleapis.com/v1";
