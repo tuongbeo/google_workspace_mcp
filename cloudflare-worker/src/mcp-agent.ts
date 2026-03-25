@@ -44,9 +44,10 @@ function getOrCreateServer(env: Env): McpServer {
   const server = new McpServer({
     name: "mcp-google-workspace",
     version: "2.1.0",
-    // category is passed through to serverInfo in the MCP initialize response,
-    // allowing clients (e.g. Claude.ai) to group/filter connectors by category.
+    // Extra serverInfo fields passed through to the MCP initialize response.
+    // MCP clients (e.g. Claude.ai) may use these for display/grouping.
     category: "Productivity",
+    logoUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/3840px-Google_%22G%22_logo.svg.png",
   } as any);
 
   // ── Core tools ───────────────────────────────────────────────────────────────
