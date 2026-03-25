@@ -41,7 +41,13 @@ let _searchEnv: Env | null = null;
 function getOrCreateServer(env: Env): McpServer {
   if (_server && _searchEnv === env) return _server;
 
-  const server = new McpServer({ name: "mcp-google-workspace", version: "2.1.0" });
+  const server = new McpServer({
+    name: "mcp-google-workspace",
+    version: "2.1.0",
+    // category is passed through to serverInfo in the MCP initialize response,
+    // allowing clients (e.g. Claude.ai) to group/filter connectors by category.
+    category: "Productivity",
+  } as any);
 
   // ── Core tools ───────────────────────────────────────────────────────────────
   registerGmailTools(server, getCreds);          // 11 tools
@@ -64,7 +70,7 @@ function getOrCreateServer(env: Env): McpServer {
   registerAppsScriptExtraTools(server, getCreds);// +5 tools (versions, delete, metrics)
   registerSearchTools(server, getCreds, env);    // 3 tools
   registerWorkspaceExtraTools(server, getCreds); // +6 tools
-  registerDocsAdvancedTools(server, getCreds);   // +10 tools (Phase 5: named ranges, footnotes, images, styling, suggestions)
+  registerDocsAdvancedTools(server, getCreds);   // +11 tools (Phase 5: named ranges, footnotes, images, styling, suggestions)
   registerDriveRevisionsTools(server, getCreds); // +6 tools (Phase 6: Drive version control)
   // ──────────────────────────────────────────── Total: ~164 tools ──
 
