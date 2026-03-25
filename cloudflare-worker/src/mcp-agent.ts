@@ -43,10 +43,9 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   try {
     accessToken = await getValidAccessToken(
       sub,
-      env.GOOGLE_OAUTH_CLIENT_ID,
+      env.OAUTH_KV,
+      env.GOOGLE_OAUTH_CLIENT_ID,    // fallback cho tokens cũ (trước khi multi-tenant upgrade)
       env.GOOGLE_OAUTH_CLIENT_SECRET,
-      "",
-      env.OAUTH_KV
     );
   } catch (err) {
     console.error("[mcp-agent] getValidAccessToken failed:", err);

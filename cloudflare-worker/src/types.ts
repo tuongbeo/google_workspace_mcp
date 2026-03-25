@@ -3,12 +3,12 @@
  */
 
 export interface Env {
-  // ─── Google OAuth 2.0 ────────────────────────────────────────────────────────
-  GOOGLE_OAUTH_CLIENT_ID: string;
-  GOOGLE_OAUTH_CLIENT_SECRET: string;
+  // ─── Google OAuth 2.0 (optional — per-connector credentials take priority) ───
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
 
   // ─── Worker config ────────────────────────────────────────────────────────────
-  PUBLIC_BASE_URL: string; // https://googleworkspace.pilacorp.workers.dev
+  PUBLIC_BASE_URL: string;
   JWT_SECRET: string;
 
   // ─── Cloudflare KV ───────────────────────────────────────────────────────────
@@ -24,6 +24,9 @@ export interface StoredTokenRecord {
   refresh_token: string;
   expires_at: number;
   scopes: string;
+  // Per-connector Google credentials — dùng khi refresh token
+  google_client_id?: string;
+  google_client_secret?: string;
 }
 
 export interface ProxyJWTPayload {
@@ -37,10 +40,11 @@ export interface OAuthStateRecord {
   redirectUri: string;
   state: string;
   codeChallenge: string;
+  googleClientId?: string; // propagate qua callback để lưu vào auth_code record
 }
 
 export interface AuthCodeRecord {
-  proxy_jwt: string;
+  google_code: string;   // raw Google auth code — exchange xảy ra tại /token
   client_id: string;
   redirect_uri: string;
 }
@@ -51,4 +55,6 @@ export interface DCRClientRecord {
   redirect_uris: string[];
   client_name: string;
   created_at: number;
+  google_client_id?: string;    // Google OAuth Client ID của connector này
+  google_client_secret?: string;
 }

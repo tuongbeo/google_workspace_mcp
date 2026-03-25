@@ -2,6 +2,7 @@
  * JWT helper + Token Manager với auto-refresh cho Google OAuth.
  * - Proxy JWT chỉ chứa `sub` (session UUID) — Google tokens thực lưu trong KV
  * - getValidAccessToken() tự động refresh khi access_token còn < 5 phút
+ * - Google credentials (client_id/secret) lưu trong StoredTokenRecord để tự refresh
  */
 
 import { Env, StoredTokenRecord } from "./types";
@@ -88,7 +89,8 @@ export async function storeTokens(
   accessToken: string,
   refreshToken: string,
   expiresIn: number,
-  oauthBaseUrl: string,
+  googleClientId: string,
+  googleClientSecret: string,
   kv: KVNamespace
 ): Promise<void> {
   const record: StoredTokenRecord = {
@@ -96,9 +98,9 @@ export async function storeTokens(
     refresh_token: refreshToken,
     expires_at: Math.floor(Date.now() / 1000) + expiresIn,
     scopes: "",
+    google_client_id: googleClientId,
+    google_client_secret: googleClientSecret,
   };
-  // Store oauth_base_url in the record for refresh
-  (record as StoredTokenRecord & { oauth_base_url: string }).oauth_base_url = oauthBaseUrl;
 
   await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(record), {
     expirationTtl: KV_TOKEN_TTL,
@@ -108,21 +110,28 @@ export async function storeTokens(
 
 export async function getValidAccessToken(
   sub: string,
-  clientId: string,
-  clientSecret: string,
-  _redirectUri: string,
-  kv: KVNamespace
+  kv: KVNamespace,
+  fallbackClientId?: string,
+  fallbackClientSecret?: string,
 ): Promise<string> {
   const raw = await kv.get(`${KV_TOKEN_PREFIX}${sub}`);
   if (!raw) throw new Error(`No token found for sub=${sub}. User must re-authenticate.`);
 
-  const record = JSON.parse(raw) as StoredTokenRecord & { oauth_base_url?: string };
+  const record = JSON.parse(raw) as StoredTokenRecord;
   const now = Math.floor(Date.now() / 1000);
   const needsRefresh = record.expires_at - now < REFRESH_THRESHOLD;
 
   if (!needsRefresh) {
     console.log(`[TokenManager] Access token valid for sub=${sub}, expires in ${record.expires_at - now}s`);
     return record.access_token;
+  }
+
+  // Resolve credentials: từ token record → env var fallback
+  const googleClientId = record.google_client_id || fallbackClientId;
+  const googleClientSecret = record.google_client_secret || fallbackClientSecret;
+
+  if (!googleClientId || !googleClientSecret) {
+    throw new Error(`No Google credentials for sub=${sub}. User must re-authenticate.`);
   }
 
   if (!record.refresh_token) {
@@ -136,8 +145,8 @@ export async function getValidAccessToken(
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "refresh_token",
-      client_id: clientId,
-      client_secret: clientSecret,
+      client_id: googleClientId,
+      client_secret: googleClientSecret,
       refresh_token: record.refresh_token,
     }).toString(),
   });
@@ -145,7 +154,15 @@ export async function getValidAccessToken(
   if (!res.ok) {
     const err = await res.text();
     console.error(`[TokenManager] Google refresh failed for sub=${sub}: ${err}`);
-    await kv.delete(`${KV_TOKEN_PREFIX}${sub}`);
+
+    // Chỉ xóa KV khi lỗi permanent (token bị revoke), không xóa khi lỗi tạm thời
+    let errBody: { error?: string } = {};
+    try { errBody = JSON.parse(err); } catch {}
+    if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
+      console.warn(`[TokenManager] Permanent auth failure (${errBody.error}) for sub=${sub}, removing token.`);
+      await kv.delete(`${KV_TOKEN_PREFIX}${sub}`);
+    }
+
     throw new Error(`Token refresh failed (${res.status}). User must re-authenticate.`);
   }
 
@@ -155,12 +172,13 @@ export async function getValidAccessToken(
     refresh_token?: string;
   };
 
-  const updated: StoredTokenRecord & { oauth_base_url?: string } = {
+  const updated: StoredTokenRecord = {
     access_token: newTokens.access_token,
     refresh_token: newTokens.refresh_token || record.refresh_token,
     expires_at: Math.floor(Date.now() / 1000) + (newTokens.expires_in || 3600),
     scopes: record.scopes,
-    oauth_base_url: record.oauth_base_url,
+    google_client_id: googleClientId,
+    google_client_secret: googleClientSecret,
   };
 
   await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(updated), {
