@@ -5,11 +5,11 @@
   "compatibility_flags": ["nodejs_compat"],
 
   // KV namespace lưu OAuth state, auth codes, tokens
-  // ID: 2750f90f2d6945729e4f4304017b6506
+  // ID: e51d896daf1f46019c04627a38beac8b (google-workspace-oauth)
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "2750f90f2d6945729e4f4304017b6506"
+      "id": "e51d896daf1f46019c04627a38beac8b"
     }
   ]
 }
