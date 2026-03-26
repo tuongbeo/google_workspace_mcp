@@ -220,6 +220,26 @@ export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Permission ${permission_id} removed from ${file_id}.` }] };
   }));
 
+  server.tool("transfer_drive_ownership", "Transfer ownership of a Drive file to another Google user. Note: the new owner must be in the same Google Workspace organization for domain-managed files.", {
+    file_id: z.string(),
+    new_owner_email: z.string().describe("Google account email of the new owner"),
+    send_notification: z.boolean().optional().default(true),
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ file_id, new_owner_email, send_notification = true }) => {
+    const { accessToken } = await getCreds();
+    const params = new URLSearchParams({
+      sendNotificationEmail: String(send_notification),
+      transferOwnership: "true",
+      fields: "id,role,emailAddress",
+    });
+    const result = await driveRequest(
+      accessToken,
+      `/files/${file_id}/permissions?${params}`,
+      "POST",
+      { role: "owner", type: "user", emailAddress: new_owner_email }
+    ) as any;
+    return { content: [{ type: "text", text: `Ownership transferred to ${new_owner_email}.\nPermission ID: ${result.id}\nRole: ${result.role}` }] };
+  }));
+
   server.tool("batch_share_drive_file", "Share a Drive file with multiple users at once.", {
     file_id: z.string(),
     recipients: z.array(z.object({ email: z.string(), role: z.enum(["reader", "commenter", "writer"]) })),

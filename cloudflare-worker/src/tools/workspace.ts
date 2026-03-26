@@ -93,13 +93,17 @@ export function registerChatTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Chat Spaces (${spaces.length}):\n${lines.join("\n")}` }] };
   }));
 
-  server.tool("get_chat_messages", "Get recent messages from a Google Chat space.", {
+  server.tool("get_chat_messages", "Get messages from a Google Chat space with optional time and sender filters.", {
     space_name: z.string().describe("Space name in format 'spaces/{spaceId}'"),
     page_size: z.number().optional().default(20),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ space_name, page_size = 20 }) => {
+    filter: z.string().optional().describe("API filter string, e.g. 'createTime > \"2025-01-01T00:00:00Z\"' or 'sender.name = \"users/123\"'"),
+    order_by: z.enum(["createTime asc", "createTime desc"]).optional().default("createTime desc"),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ space_name, page_size = 20, filter, order_by = "createTime desc" }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages?pageSize=${page_size}&orderBy=createTime+desc`, accessToken) as any;
-    const messages = (data.messages || []).reverse();
+    const params = new URLSearchParams({ pageSize: String(page_size), orderBy: order_by });
+    if (filter) params.set("filter", filter);
+    const data = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages?${params}`, accessToken) as any;
+    const messages = order_by === "createTime desc" ? (data.messages || []).reverse() : (data.messages || []);
     if (!messages.length) return { content: [{ type: "text", text: "No messages." }] };
     const lines = messages.map((m: any) => {
       const sender = m.sender?.displayName || m.sender?.name || "Unknown";
@@ -119,16 +123,26 @@ export function registerChatTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Message sent! Message name: ${result.name}` }] };
   }));
 
-  server.tool("search_chat_messages", "Search messages across Google Chat spaces.", {
-    query: z.string().describe("Search query"),
+  server.tool("search_chat_messages", "Search messages across Google Chat spaces, with optional createTime filter.", {
+    query: z.string().describe("Full-text search query"),
     page_size: z.number().optional().default(20),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 20 }) => {
+    create_time_after: z.string().optional().describe("ISO 8601 datetime — only return messages after this time, e.g. '2025-01-01T00:00:00Z'"),
+    create_time_before: z.string().optional().describe("ISO 8601 datetime — only return messages before this time"),
+    space_name: z.string().optional().describe("Limit to a specific space, e.g. 'spaces/{spaceId}'"),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 20, create_time_after, create_time_before, space_name }) => {
     const { accessToken } = await getCreds();
-    const params = new URLSearchParams({ query, pageSize: String(page_size) });
+    const filters: string[] = [];
+    if (create_time_after) filters.push(`createTime > "${create_time_after}"`);
+    if (create_time_before) filters.push(`createTime < "${create_time_before}"`);
+    if (space_name) filters.push(`spaces/${space_name.replace(/^spaces\//, "")}`);
+    const params = new URLSearchParams({ query, pageSize: String(Math.min(page_size, 25)) });
+    if (filters.length) params.set("filter", filters.join(" AND "));
     const data = await googleFetch(`https://chat.googleapis.com/v1/spaces/messages:search?${params}`, accessToken) as any;
     const messages = data.messages || [];
     if (!messages.length) return { content: [{ type: "text", text: `No messages found for: "${query}"` }] };
-    const lines = messages.map((m: any) => `[${m.createTime}] ${m.sender?.displayName}: ${m.text || "(media)"}\nSpace: ${m.name}`);
+    const lines = messages.map((m: any) =>
+      `[${m.createTime}] ${m.sender?.displayName || m.sender?.name}: ${m.text || "(media)"}\nSpace: ${m.space?.name || m.name?.split("/messages/")[0] || "?"}`
+    );
     return { content: [{ type: "text", text: lines.join("\n\n") }] };
   }));
 }
@@ -257,17 +271,62 @@ export function registerTasksTools(server: McpServer, getCreds: GetCredsFunc) {
 // ── Google Forms ──────────────────────────────────────────────────────────────
 
 export function registerFormsTools(server: McpServer, getCreds: GetCredsFunc) {
-  server.tool("get_form", "Get details and structure of a Google Form.", {
+  server.tool("get_form", "Get details, structure, settings, and linked spreadsheet of a Google Form.", {
     form_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ form_id }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}`, accessToken) as any;
-    const lines = [`Form: ${data.info?.title}`, `ID: ${data.formId}`, `Description: ${data.info?.description || "N/A"}`, `Items: ${data.items?.length || 0}`, `Responder URI: ${data.responderUri || "N/A"}`, "", "Questions:"];
-    for (const item of (data.items || [])) {
-      const q = item.questionItem?.question;
-      if (!q) continue;
-      const type = q.textQuestion ? "TEXT" : q.choiceQuestion ? "CHOICE" : q.scaleQuestion ? "SCALE" : q.dateQuestion ? "DATE" : "OTHER";
-      lines.push(`  - [${type}${q.required ? "*" : ""}] ${item.title || "Untitled"}`);
+    const settings = data.settings || {};
+    const lines = [
+      `Form: ${data.info?.title}`,
+      `ID: ${data.formId}`,
+      `Description: ${data.info?.description || "N/A"}`,
+      `Document title: ${data.info?.documentTitle || "N/A"}`,
+      `Responder URI: ${data.responderUri || "N/A"}`,
+      `Items: ${data.items?.length || 0}`,
+      "",
+      "Settings:",
+      `  Email collection: ${settings.emailCollectionType || "DO_NOT_COLLECT"}`,
+      `  One response per user: ${settings.limitOneResponsePerUser ?? false}`,
+      `  Show progress bar: ${settings.progressBar ?? false}`,
+      `  Shuffle questions: ${settings.shuffleQuestions ?? false}`,
+      `  Confirmation message: ${settings.confirmationMessage?.text || "(default)"}`,
+    ];
+    if (settings.quizSettings?.isQuiz) {
+      lines.push(`  Quiz mode: true`);
+      const qs = settings.quizSettings;
+      if (qs.autoScore !== undefined) lines.push(`  Auto-score: ${qs.autoScore}`);
+      if (qs.defaultFeedback?.text) lines.push(`  Default quiz feedback: ${qs.defaultFeedback.text}`);
+    }
+    if (data.linkedSheetId) {
+      lines.push(`\nLinked Google Sheet:`);
+      lines.push(`  ID: ${data.linkedSheetId}`);
+      lines.push(`  URL: https://docs.google.com/spreadsheets/d/${data.linkedSheetId}/edit`);
+    }
+    if (data.items?.length) {
+      lines.push("\nQuestions:");
+      for (const item of data.items) {
+        if (item.questionItem) {
+          const q = item.questionItem.question;
+          const type = q.textQuestion ? "TEXT" : q.choiceQuestion ? `CHOICE(${q.choiceQuestion.type})` : q.scaleQuestion ? "SCALE" : q.dateQuestion ? "DATE" : q.timeQuestion ? "TIME" : q.fileUploadQuestion ? "FILE_UPLOAD" : q.rowQuestion ? "ROW" : "OTHER";
+          const required = q.required ? "*" : "";
+          lines.push(`  - [${type}${required}] ${item.title || "Untitled"} (ID: ${item.itemId})`);
+          if (q.choiceQuestion?.options) {
+            lines.push(`    Options: ${q.choiceQuestion.options.map((o: any) => o.value).join(", ")}`);
+          }
+          if (q.scaleQuestion) {
+            lines.push(`    Scale: ${q.scaleQuestion.low} (${q.scaleQuestion.lowLabel || ""}) → ${q.scaleQuestion.high} (${q.scaleQuestion.highLabel || ""})`);
+          }
+        } else if (item.questionGroupItem) {
+          lines.push(`  - [QUESTION_GROUP] ${item.title || "Untitled"} (${item.questionGroupItem.questions?.length || 0} sub-questions)`);
+        } else if (item.pageBreakItem) {
+          lines.push(`  - [PAGE_BREAK] ${item.title || ""}`);
+        } else if (item.textItem) {
+          lines.push(`  - [TEXT_BLOCK] ${item.title || ""}`);
+        } else if (item.imageItem) {
+          lines.push(`  - [IMAGE] ${item.title || ""}`);
+        }
+      }
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));

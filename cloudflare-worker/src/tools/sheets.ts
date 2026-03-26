@@ -36,16 +36,35 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Found ${files.length} spreadsheets:\n\n${lines.join("\n\n")}` }] };
   }));
 
-  server.tool("read_sheet_values", "Read values from a Google Sheets range.", {
+  server.tool("read_sheet_values", "Read values from a Google Sheets range, optionally including cell notes.", {
     spreadsheet_id: z.string(),
     range: z.string().describe("A1 notation, e.g. 'Sheet1!A1:D10'"),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ spreadsheet_id, range }) => {
+    include_notes: z.boolean().optional().default(false).describe("Include cell notes/comments alongside values"),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ spreadsheet_id, range, include_notes = false }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}`) as any;
-    const values = data.values || [];
-    if (!values.length) return { content: [{ type: "text", text: "No data found." }] };
-    const lines = values.map((row: any[]) => row.join("\t"));
-    return { content: [{ type: "text", text: `Data in ${range} (${values.length} rows):\n\n${lines.join("\n")}` }] };
+
+    if (!include_notes) {
+      const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}`) as any;
+      const values = data.values || [];
+      if (!values.length) return { content: [{ type: "text", text: "No data found." }] };
+      const lines = values.map((row: any[]) => row.join("\t"));
+      return { content: [{ type: "text", text: `Data in ${range} (${values.length} rows):\n\n${lines.join("\n")}` }] };
+    }
+
+    // Include notes: use spreadsheets.get with includeGridData
+    const params = new URLSearchParams({ ranges: range, includeGridData: "true", fields: "sheets.data.rowData.values(formattedValue,note)" });
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `?${params}`) as any;
+    const rowData = data.sheets?.[0]?.data?.[0]?.rowData || [];
+    if (!rowData.length) return { content: [{ type: "text", text: "No data found." }] };
+    const lines = rowData.map((row: any) => {
+      const cells = row.values || [];
+      return cells.map((cell: any) => {
+        const val = cell.formattedValue || "";
+        const note = cell.note ? ` [note: ${cell.note}]` : "";
+        return `${val}${note}`;
+      }).join("\t");
+    });
+    return { content: [{ type: "text", text: `Data in ${range} (${lines.length} rows, with notes):\n\n${lines.join("\n")}` }] };
   }));
 
   server.tool("write_sheet_values", "Write values to a Google Sheets range.", {

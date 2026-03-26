@@ -17,6 +17,13 @@ function extractBody(payload: any): string {
   for (const part of payload?.parts || []) {
     if (part.mimeType === "text/plain" && part.body?.data) return decodeBase64Url(part.body.data);
   }
+  // Fallback: HTML-only emails — strip tags to plain text
+  for (const part of payload?.parts || []) {
+    if (part.mimeType === "text/html" && part.body?.data) {
+      const html = decodeBase64Url(part.body.data);
+      return html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\n{3,}/g, "\n\n").trim();
+    }
+  }
   for (const part of payload?.parts || []) {
     const r = extractBody(part); if (r) return r;
   }
@@ -55,7 +62,17 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     const hdrs: Record<string, string> = {};
     for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
     const body = extractBody(data.payload);
-    return { content: [{ type: "text", text: [`Subject: ${hdrs.subject || "(none)"}`, `From: ${hdrs.from || "?"}`, `To: ${hdrs.to || ""}`, `Date: ${hdrs.date || ""}`, `Labels: ${(data.labelIds || []).join(", ")}`, "", "--- BODY ---", body || "[No readable content]"].join("\n") }] };
+    const metaLines = [
+      `Subject: ${hdrs.subject || "(none)"}`,
+      `From: ${hdrs.from || "?"}`,
+      `To: ${hdrs.to || ""}`,
+      `Date: ${hdrs.date || ""}`,
+      hdrs["message-id"] && `Message-ID: ${hdrs["message-id"]}`,
+      hdrs["in-reply-to"] && `In-Reply-To: ${hdrs["in-reply-to"]}`,
+      hdrs["references"] && `References: ${hdrs["references"]}`,
+      `Labels: ${(data.labelIds || []).join(", ")}`,
+    ].filter(Boolean) as string[];
+    return { content: [{ type: "text", text: [...metaLines, "", "--- BODY ---", body || "[No readable content]"].join("\n") }] };
   }));
 
   server.tool("get_gmail_messages_content_batch", "Batch-retrieve full content of multiple Gmail messages.", {
@@ -117,17 +134,54 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Email sent! Message ID: ${result.id}` }] };
   }));
 
-  server.tool("create_gmail_draft", "Create a Gmail draft.", {
+  server.tool("create_gmail_draft", "Create a Gmail draft, with optional reply threading and quoted content.", {
     to: z.string(),
     subject: z.string(),
     body: z.string(),
     cc: z.string().optional(),
-  }, withErrorHandler(async ({ to, subject, body, cc }) => {
+    bcc: z.string().optional(),
+    html: z.boolean().optional().default(false).describe("Set true to send HTML body"),
+    in_reply_to_message_id: z.string().optional().describe("Gmail message ID to reply to — auto-populates In-Reply-To, References headers and threads the draft correctly"),
+    include_quoted_content: z.boolean().optional().default(false).describe("Append the original quoted message below the body (signature renders above quoted block, like a native reply)"),
+  }, withErrorHandler(async ({ to, subject, body, cc, bcc, html = false, in_reply_to_message_id, include_quoted_content = false }) => {
     const { accessToken } = await getCreds();
-    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8`;
+    const contentType = html ? "text/html" : "text/plain";
+    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: ${contentType}; charset=utf-8`;
     if (cc) headers += `\r\nCc: ${cc}`;
-    const result = await gmailRequest(accessToken, "/drafts", "POST", { message: { raw: encodeEmail(headers, body) } }) as any;
-    return { content: [{ type: "text", text: `Draft created! Draft ID: ${result.id}` }] };
+    if (bcc) headers += `\r\nBcc: ${bcc}`;
+
+    const payload: Record<string, unknown> = {};
+    let finalBody = body;
+
+    if (in_reply_to_message_id) {
+      const origMsg = await gmailRequest(accessToken, `/messages/${in_reply_to_message_id}?format=full`) as any;
+      const origHdrs: Record<string, string> = {};
+      for (const h of origMsg?.payload?.headers || []) origHdrs[h.name.toLowerCase()] = h.value;
+
+      const origMsgId = origHdrs["message-id"] || "";
+      const origRefs  = origHdrs["references"] || "";
+      if (origMsgId) {
+        headers += `\r\nIn-Reply-To: ${origMsgId}`;
+        headers += `\r\nReferences: ${origRefs ? `${origRefs} ${origMsgId}` : origMsgId}`;
+      }
+      if (origMsg?.threadId) payload.threadId = origMsg.threadId;
+
+      if (include_quoted_content) {
+        const origBody = extractBody(origMsg.payload);
+        const from = origHdrs["from"] || "Unknown";
+        const date = origHdrs["date"] || "";
+        if (html) {
+          finalBody = body + `<br><br><blockquote style="border-left:2px solid #ccc;margin-left:8px;padding-left:8px;color:#666"><b>On ${date}, ${from} wrote:</b><br>${origBody.replace(/\n/g, "<br>")}</blockquote>`;
+        } else {
+          const quoted = origBody.split("\n").map((l: string) => `> ${l}`).join("\n");
+          finalBody = `${body}\n\nOn ${date}, ${from} wrote:\n${quoted}`;
+        }
+      }
+    }
+
+    payload.message = { raw: encodeEmail(headers, finalBody) };
+    const result = await gmailRequest(accessToken, "/drafts", "POST", payload) as any;
+    return { content: [{ type: "text", text: `Draft created! Draft ID: ${result.id}${in_reply_to_message_id ? " (threaded reply)" : ""}` }] };
   }));
 
   server.tool("list_gmail_labels", "List all Gmail labels.", {}, { readOnlyHint: true }, withErrorHandler(async () => {

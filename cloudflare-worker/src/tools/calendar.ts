@@ -42,6 +42,8 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       lines.push(`📅 ${ev.summary || "(no title)"}`);
       lines.push(`   Start: ${start} | End: ${end}`);
       if (ev.location) lines.push(`   Location: ${ev.location}`);
+      const meetUrl = ev.hangoutLink || ev.conferenceData?.entryPoints?.find((e: any) => e.entryPointType === "video")?.uri;
+      if (meetUrl) lines.push(`   Meeting: ${meetUrl}`);
       if (ev.attendees?.length) lines.push(`   Attendees: ${ev.attendees.map((a: any) => `${a.email} (${a.responseStatus})`).join(", ")}`);
       lines.push(`   ID: ${ev.id} | Status: ${ev.status} | Link: ${ev.htmlLink || "N/A"}`);
       lines.push("");
@@ -84,7 +86,8 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     recurrence: z.array(z.string()).optional().describe("RRULE strings, e.g. ['RRULE:FREQ=WEEKLY;BYDAY=MO']"),
     color_id: z.string().optional().describe("1-11: 1=Lavender,2=Sage,3=Grape,4=Flamingo,5=Banana,6=Tangerine,7=Peacock,8=Graphite,9=Blueberry,10=Basil,11=Tomato"),
     all_day: z.boolean().optional().default(false),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false }) => {
+    visibility: z.enum(["default", "public", "private", "confidential"]).optional().describe("Event visibility for attendees"),
+  }, { readOnlyHint: false }, withErrorHandler(async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false, visibility }) => {
     const { accessToken } = await getCreds();
     const event: Record<string, unknown> = { summary };
     if (all_day) {
@@ -99,6 +102,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (attendees?.length) event.attendees = attendees.map(e => ({ email: e }));
     if (recurrence?.length) event.recurrence = recurrence;
     if (color_id) event.colorId = color_id;
+    if (visibility) event.visibility = visibility;
     if (add_google_meet) {
       event.conferenceData = { createRequest: { requestId: crypto.randomUUID(), conferenceSolutionKey: { type: "hangoutsMeet" } } };
     }
@@ -123,7 +127,8 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     attendees: z.array(z.string()).optional().describe("Full attendee list (replaces existing)"),
     color_id: z.string().optional(),
     send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all"),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ event_id, calendar_id = "primary", summary, start_time, end_time, description, location, attendees, color_id, send_updates = "all" }) => {
+    visibility: z.enum(["default", "public", "private", "confidential"]).optional(),
+  }, { readOnlyHint: false }, withErrorHandler(async ({ event_id, calendar_id = "primary", summary, start_time, end_time, description, location, attendees, color_id, send_updates = "all", visibility }) => {
     const { accessToken } = await getCreds();
     const patch: Record<string, unknown> = {};
     if (summary) patch.summary = summary;
@@ -133,6 +138,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (end_time) patch.end = { dateTime: end_time };
     if (attendees?.length) patch.attendees = attendees.map(e => ({ email: e }));
     if (color_id) patch.colorId = color_id;
+    if (visibility) patch.visibility = visibility;
     const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "PATCH", patch) as any;
     return { content: [{ type: "text", text: `Event updated: "${result.summary}"\nLink: ${result.htmlLink}` }] };
   }));

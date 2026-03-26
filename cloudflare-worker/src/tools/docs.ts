@@ -622,6 +622,72 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       return { content: [{ type: "text", text: parts.join("\n") }] };
     }));
 
+  server.tool("apply_doc_text_style",
+    "Apply character-level text formatting (bold, italic, underline, strikethrough, font size, color) to a range in a Google Doc.",
+    {
+      document_id: z.string(),
+      start_index: z.number(),
+      end_index: z.number(),
+      bold: z.boolean().optional(),
+      italic: z.boolean().optional(),
+      underline: z.boolean().optional(),
+      strikethrough: z.boolean().optional(),
+      font_size: z.number().optional().describe("Font size in points"),
+      foreground_color_hex: z.string().optional().describe("Text color hex, e.g. '#FF0000'"),
+      background_color_hex: z.string().optional().describe("Text highlight color hex"),
+      tab_id: z.string().optional().describe("Tab ID for multi-tab docs"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, start_index, end_index, bold, italic, underline, strikethrough, font_size, foreground_color_hex, background_color_hex, tab_id }) => {
+      const { accessToken } = await getCreds();
+      const textStyle: Record<string, unknown> = {};
+      const fields: string[] = [];
+      if (bold !== undefined) { textStyle.bold = bold; fields.push("bold"); }
+      if (italic !== undefined) { textStyle.italic = italic; fields.push("italic"); }
+      if (underline !== undefined) { textStyle.underline = underline; fields.push("underline"); }
+      if (strikethrough !== undefined) { textStyle.strikethrough = strikethrough; fields.push("strikethrough"); }
+      if (font_size !== undefined) { textStyle.fontSize = { magnitude: font_size, unit: "PT" }; fields.push("fontSize"); }
+      if (foreground_color_hex) {
+        const hex = foreground_color_hex.replace("#", "");
+        textStyle.foregroundColor = { color: { rgbColor: { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 } } };
+        fields.push("foregroundColor");
+      }
+      if (background_color_hex) {
+        const hex = background_color_hex.replace("#", "");
+        textStyle.backgroundColor = { color: { rgbColor: { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 } } };
+        fields.push("backgroundColor");
+      }
+      if (!fields.length) return { content: [{ type: "text", text: "No formatting options provided." }] };
+      const range: Record<string, unknown> = { startIndex: start_index, endIndex: end_index };
+      if (tab_id) range.tabId = tab_id;
+      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        requests: [{ updateTextStyle: { range, textStyle, fields: fields.join(",") } }],
+      });
+      return { content: [{ type: "text", text: `Text style applied to range ${start_index}-${end_index}: ${fields.join(", ")}` }] };
+    })
+  );
+
+  server.tool("create_bullet_list",
+    "Convert paragraphs in a range to a bulleted or numbered list in a Google Doc.",
+    {
+      document_id: z.string(),
+      start_index: z.number(),
+      end_index: z.number(),
+      list_type: z.enum(["BULLET_DISC_CIRCLE_SQUARE", "NUMBERED_DECIMAL_ALPHA_ROMAN", "BULLET_ARROW3D_CIRCLE_SQUARE", "BULLET_CHECKBOX"]).optional().default("BULLET_DISC_CIRCLE_SQUARE"),
+      tab_id: z.string().optional().describe("Tab ID for multi-tab docs"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, start_index, end_index, list_type = "BULLET_DISC_CIRCLE_SQUARE", tab_id }) => {
+      const { accessToken } = await getCreds();
+      const range: Record<string, unknown> = { startIndex: start_index, endIndex: end_index };
+      if (tab_id) range.tabId = tab_id;
+      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        requests: [{ createParagraphBullets: { range, bulletPreset: list_type } }],
+      });
+      return { content: [{ type: "text", text: `Bullet list (${list_type}) created for range ${start_index}-${end_index}.` }] };
+    })
+  );
+
   server.tool("insert_multiple_mentions",
     "Insert multiple @mention smart chips in one batch operation. " +
     "Each mention is appended as a new line. All chips are real Google smart chips. " +
