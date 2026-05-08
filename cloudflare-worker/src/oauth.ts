@@ -39,7 +39,6 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/contacts",
   // Apps Script
   "https://www.googleapis.com/auth/script.projects",
-  "https://www.googleapis.com/auth/script.runs",
   "https://www.googleapis.com/auth/script.metrics",
   "https://www.googleapis.com/auth/script.deployments",
 ].join(" ");
