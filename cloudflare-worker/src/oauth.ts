@@ -139,6 +139,7 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
 // After success, store proxy JWT as pending_jwt:${tempCode} for /token to collect.
 
 export async function handleCallback(request: Request, env: Env): Promise<Response> {
+  try {
   const url  = new URL(request.url);
   const code = url.searchParams.get("code");
   const rawState = url.searchParams.get("state") || "";
@@ -241,14 +242,27 @@ npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
   // Issue proxy JWT and store as pending for /token to collect (TTL 2 min)
   const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
   const tempCode = crypto.randomUUID();
-  await env.OAUTH_KV.put(`pending_jwt:${tempCode}`, proxyJWT, { expirationTtl: 120 });
+  await env.OAUTH_KV.put(`pending_jwt:${tempCode}`, proxyJWT, { expirationTtl: 300 });
 
   console.log(`[callback] SUCCESS sub=${sub}, tempCode=${tempCode}`);
 
-  const clientRedirect = new URL(stateRecord.redirectUri);
-  clientRedirect.searchParams.set("code",  tempCode);
-  clientRedirect.searchParams.set("state", rawState);
-  return Response.redirect(clientRedirect.toString(), 302);
+    const clientRedirect = new URL(stateRecord.redirectUri);
+    clientRedirect.searchParams.set("code",  tempCode);
+    clientRedirect.searchParams.set("state", rawState);
+    return Response.redirect(clientRedirect.toString(), 302);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[callback] Unexpected error:", msg);
+    return new Response(
+      `<html><head><meta charset="utf-8"></head><body style="font-family:Arial;max-width:600px;margin:40px auto;padding:20px">
+       <h2>❌ Internal Error</h2>
+       <p>An unexpected error occurred during authorization:</p>
+       <pre style="background:#fee;padding:12px;border-radius:4px;word-break:break-all">${msg}</pre>
+       <p>Please try disconnecting and reconnecting the MCP connector.</p>
+       </body></html>`,
+      { status: 500, headers: { "Content-Type": "text/html" } }
+    );
+  }
 }
 
 // ── POST /token — Return the pending JWT created at /callback ─────────────────
