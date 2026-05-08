@@ -25,6 +25,7 @@ import { registerSheetsPhase2Tools } from "./tools/sheets-phase2";
 import { registerDocsPhase2Tools } from "./tools/docs-phase2";
 import { registerSlidesPhase2Tools } from "./tools/slides-phase2";
 import { registerAppsScriptPhase2Tools } from "./tools/appsscript-phase2";
+import { registerConsolidatedTools } from "./tools/consolidated";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -83,7 +84,8 @@ function getOrCreateServer(env: Env): McpServer {
   registerDocsPhase2Tools(server, getCreds);     // +3 tools (Phase 2C: manage_table_cells, section_break, delete_bullets)
   registerSlidesPhase2Tools(server, getCreds);   // +4 tools (Phase 2D: create_shape, create_line, group_objects, update_shape_properties)
   registerAppsScriptPhase2Tools(server, getCreds); // +1 tool (Phase 2E: manage_triggers)
-  // ──────────────────────────────────────────── Total: ~185 tools ──
+  registerConsolidatedTools(server, getCreds);   // +8 tools (Phase 3: manage_doc_tabs/named_ranges/comments/suggestions/drive_revisions/script_deployments/script_versions/contact_groups)
+  // ──────────────────────────────────────────── Total: ~193 tools ──
 
   _server = server;
   _searchEnv = env;
