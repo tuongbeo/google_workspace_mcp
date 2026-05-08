@@ -20,18 +20,28 @@ const GOOGLE_SCOPES = [
   "openid",
   "email",
   "profile",
+  // Gmail
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.settings.basic",  // filters, vacation responder
+  // Drive, Docs, Sheets, Slides
   "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/documents",
   "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/presentations",
+  // Calendar, Tasks, Forms
+  "https://www.googleapis.com/auth/calendar",
+  "https://www.googleapis.com/auth/tasks",
+  "https://www.googleapis.com/auth/forms.body",
+  // Chat, Contacts
   "https://www.googleapis.com/auth/chat.messages",
   "https://www.googleapis.com/auth/chat.spaces",
-  "https://www.googleapis.com/auth/forms.body",
-  "https://www.googleapis.com/auth/tasks",
   "https://www.googleapis.com/auth/contacts",
+  // Apps Script
+  "https://www.googleapis.com/auth/script.projects",
+  "https://www.googleapis.com/auth/script.runs",
+  "https://www.googleapis.com/auth/script.metrics",
+  "https://www.googleapis.com/auth/script.deployments",
 ].join(" ");
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -314,7 +324,9 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     );
   }
 
-  // Lưu Google tokens + credentials vào KV (credentials dùng lại khi refresh)
+  // ROOT CAUSE FIX: must write to TOKENS_KV (separate namespace for Google tokens)
+  // mcp-agent.ts reads via getValidAccessToken(sub, env.TOKENS_KV, ...)
+  // Previously: env.OAUTH_KV → token written there but read from TOKENS_KV → never found → 401
   const sub = crypto.randomUUID();
   await storeTokens(
     sub,
@@ -323,7 +335,7 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     googleTokens.expires_in || 3600,
     googleClientId,
     googleClientSecret,
-    env.OAUTH_KV
+    env.TOKENS_KV
   );
 
   // Issue proxy JWT — chỉ chứa sub, TTL 30 ngày
