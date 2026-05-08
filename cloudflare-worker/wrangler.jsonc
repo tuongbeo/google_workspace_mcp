@@ -8,8 +8,19 @@
   // ID: e51d896daf1f46019c04627a38beac8b (google-workspace-oauth)
   "kv_namespaces": [
     {
+      // Operational: OAuth state (10m), pending_jwt (2m), DCR client records (90d)
       "binding": "OAUTH_KV",
       "id": "e51d896daf1f46019c04627a38beac8b"
+    },
+    {
+      // Sensitive: Google access/refresh tokens (90d)
+      "binding": "TOKENS_KV",
+      "id": "f57a70d271024b669640803bd4a9a2a1"
+    },
+    {
+      // Config: feature flags, oauth_scopes
+      "binding": "CONFIG_KV",
+      "id": "78cc72f93f34486dab1ff1a3fd5ecd81"
     }
   ]
 }

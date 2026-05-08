@@ -166,10 +166,17 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
   console.log(`[callback] state=${rawState}, googleClientId=${googleClientId ? "SET" : "MISSING"}, googleClientSecret=${googleClientSecret ? "SET" : "MISSING"}`);
 
   if (!googleClientId || !googleClientSecret) {
+    const missing = [!googleClientId && "Client ID", !googleClientSecret && "Client Secret"].filter(Boolean).join(", ");
     return new Response(
-      `<html><body><h2>Configuration Error</h2>
-       <p>Google OAuth credentials not found. Please reconnect and ensure you provide both Client ID and Client Secret.</p>
-       <p>Debug: clientId=${googleClientId ? "present" : "MISSING"}, secret=${googleClientSecret ? "present" : "MISSING"}</p>
+      `<html><head><meta charset="utf-8"></head><body style="font-family:Arial;max-width:600px;margin:40px auto;padding:20px">
+       <h2>⚙️ MCP Server Configuration Required</h2>
+       <p>Missing Google OAuth credentials: <strong>${missing}</strong></p>
+       <p>Please run these commands in your terminal, then reconnect:</p>
+       <pre style="background:#f4f4f4;padding:12px;border-radius:4px">cd ~/Development/google_workspace_mcp/cloudflare-worker
+npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET --name google-workspace
+npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
+       <p>You can find your credentials in <a href="https://console.cloud.google.com/apis/credentials">Google Cloud Console → Credentials</a>.</p>
+       <p style="color:#888;font-size:12px">Debug: clientId=${googleClientId ? "✓ present" : "✗ MISSING"}, secret=${googleClientSecret ? "✓ present" : "✗ MISSING"}</p>
        </body></html>`,
       { status: 400, headers: { "Content-Type": "text/html" } }
     );
