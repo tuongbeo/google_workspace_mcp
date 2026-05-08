@@ -147,17 +147,26 @@ export function registerSlidesPhase2Tools(server: McpServer, getCreds: GetCredsF
       const w = Math.abs(end_x - start_x) || 1;
       const h = Math.abs(end_y - start_y) || 1;
 
-      const lineTypeMap: Record<string, string> = {
-        STRAIGHT: "STRAIGHT_CONNECTOR_1",
-        BENT:     "BENT_CONNECTOR_3",
-        CURVED:   "CURVED_CONNECTOR_3",
+      const lineCatMap: Record<string, string> = {
+        STRAIGHT: "STRAIGHT",
+        BENT:     "BENT",
+        CURVED:   "CURVED",
+      };
+      // Arrow style mapping to Slides API ArrowStyle enum
+      const arrowMap: Record<string, string> = {
+        NONE:    "NONE",
+        ARROW:   "FILL_ARROW",
+        OPEN:    "OPEN_ARROW",
+        STEALTH: "STEALTH_ARROW",
+        DIAMOND: "FILL_DIAMOND",
+        CIRCLE:  "FILL_CIRCLE",
       };
 
       const requests: any[] = [
         {
           createLine: {
             objectId,
-            lineType: lineTypeMap[line_type] || "STRAIGHT_CONNECTOR_1",
+            lineCategory: lineCatMap[line_type] || "STRAIGHT",
             elementProperties: {
               pageObjectId: slide_object_id,
               size: {
@@ -179,16 +188,11 @@ export function registerSlidesPhase2Tools(server: McpServer, getCreds: GetCredsF
       const lineProps: any = {
         dashStyle: dash_style,
         weight: { magnitude: ptToEmu(weight_pt), unit: "EMU" },
-        startArrow: start_arrow + (start_arrow !== "NONE" ? "_HEAD" : ""),
-        endArrow:   end_arrow   + (end_arrow   !== "NONE" ? "_HEAD" : ""),
+        startArrow: arrowMap[start_arrow] || "NONE",
+        endArrow:   arrowMap[end_arrow]   || "NONE",
       };
-      let fields = "dashStyle,weight";
-      if (start_arrow !== "NONE") fields += ",startArrow";
-      if (end_arrow   !== "NONE") fields += ",endArrow";
-      if (color) {
-        lineProps.lineFill = solidFill(color);
-        fields += ",lineFill.solidFill.color";
-      }
+      const fields = ["dashStyle","weight","startArrow","endArrow"].join(",");
+      if (color) lineProps.lineFill = solidFill(color);
 
       requests.push({
         updateLineProperties: { objectId, lineProperties: lineProps, fields },
@@ -263,8 +267,8 @@ export function registerSlidesPhase2Tools(server: McpServer, getCreds: GetCredsF
         }
       }
       if (shadow !== undefined) {
-        shapeProps.shadow = { type: shadow ? "OUTER" : "NO_SHADOW", enabled: shadow };
-        fields.push("shadow.type","shadow.enabled");
+        shapeProps.shadow = { propertyState: shadow ? "RENDERED" : "NOT_RENDERED" };
+        fields.push("shadow.propertyState");
       }
 
       if (!fields.length) return { content: [{ type: "text", text: "No changes specified." }] };

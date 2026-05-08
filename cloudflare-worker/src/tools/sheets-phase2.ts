@@ -24,6 +24,22 @@ async function batchUpdate(accessToken: string, spreadsheetId: string, requests:
   return sheetsRequest(accessToken, spreadsheetId, ":batchUpdate", "POST", { requests });
 }
 
+/** Parse A1-notation range like "Sheet1!A1:D7" into GridRange with sheetId */
+function parseA1ToGridRange(a1: string, sheetId: number) {
+  // Strip sheet name if present
+  const cellPart = a1.includes("!") ? a1.split("!")[1] : a1;
+  const match = cellPart.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+  if (!match) return { sheetId, startRowIndex: 0, endRowIndex: 0, startColumnIndex: 0, endColumnIndex: 0 };
+  const colToIdx = (col: string) => col.toUpperCase().split("").reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0) - 1;
+  return {
+    sheetId,
+    startRowIndex:    parseInt(match[2]) - 1,
+    endRowIndex:      parseInt(match[4]),
+    startColumnIndex: colToIdx(match[1]),
+    endColumnIndex:   colToIdx(match[3]) + 1,
+  };
+}
+
 export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsFunc) {
 
   // ── manage_charts ───────────────────────────────────────────────────────────
@@ -67,34 +83,44 @@ export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsF
 
       if (action === "create") {
         if (!source_range) throw new Error("source_range required for create");
-        // Parse A1 range to GridRange
-        const [sheetPart, cellPart] = source_range.includes("!") ? source_range.split("!") : ["", source_range];
-        const sheetName = sheetPart || undefined;
-        const spec: any = {
-          title: title || "",
-        };
+        const gridRange = parseA1ToGridRange(source_range, sheet_id ?? 0);
+        // Domain = first column, series = remaining columns
+        const domainRange = { ...gridRange, endColumnIndex: gridRange.startColumnIndex + 1 };
+        const spec: any = { title: title || "" };
+
         if (chart_type === "PIE") {
           spec.pieChart = {
             legendPosition: legend_position || "RIGHT_LEGEND",
-            domain: { sourceRange: { sources: [{ sheetName, startRowIndex: 0, endRowIndex: 0, startColumnIndex: 0, endColumnIndex: 1 }] } },
-            series: { sourceRange: { sources: [{ sheetName, startRowIndex: 0, endRowIndex: 0, startColumnIndex: 1, endColumnIndex: 2 }] } },
+            domain: { sourceRange: { sources: [domainRange] } },
+            series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: gridRange.startColumnIndex + 1 }] } },
           };
         } else {
+          // Build one series per column beyond domain
+          const seriesList = [];
+          for (let c = gridRange.startColumnIndex + 1; c < gridRange.endColumnIndex; c++) {
+            seriesList.push({
+              series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: c, endColumnIndex: c + 1 }] } },
+            });
+          }
           spec.basicChart = {
             chartType: chart_type || "COLUMN",
             legendPosition: legend_position || "BOTTOM_LEGEND",
+            headerCount: 1,
             axis: [{ position: "BOTTOM_AXIS" }, { position: "LEFT_AXIS" }],
-            domains: [{ domain: { sourceRange: { sources: [{ sheetName, startRowIndex: 0, endRowIndex: 0, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
-            series: [{ series: { sourceRange: { sources: [{ sheetName, startRowIndex: 0, endRowIndex: 0, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
+            domains: [{ domain: { sourceRange: { sources: [domainRange] } } }],
+            series: seriesList.length ? seriesList : [{
+              series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: gridRange.startColumnIndex + 1 }] } },
+            }],
           };
         }
+
         const req = {
           addChart: {
             chart: {
               spec,
               position: {
                 overlayPosition: {
-                  anchorCell: { sheetId: sheet_id, rowIndex: position?.row ?? 1, columnIndex: position?.col ?? 0 },
+                  anchorCell: { sheetId: sheet_id ?? 0, rowIndex: position?.row ?? 1, columnIndex: position?.col ?? 0 },
                   widthPixels: 600, heightPixels: 400,
                 },
               },

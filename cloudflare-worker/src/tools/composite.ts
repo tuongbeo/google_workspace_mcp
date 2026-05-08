@@ -17,11 +17,11 @@ function hexToRgb(hex: string) {
   return { red: parseInt(h.slice(0,2),16)/255, green: parseInt(h.slice(2,4),16)/255, blue: parseInt(h.slice(4,6),16)/255 };
 }
 
-function buildNamedStyleReq(type: string, color: string, size: number, bold: boolean, font: string, above: number, below: number) {
+function buildNamedStyleReq(styleType: string, color: string, size: number, bold: boolean, font: string, above: number, below: number) {
   return {
     updateNamedStyle: {
       namedStyle: {
-        namedStyleType: type,
+        namedStyleType: styleType,
         textStyle: {
           foregroundColor: { color: { rgbColor: hexToRgb(color) } },
           fontSize: { magnitude: size, unit: "PT" },
@@ -33,7 +33,7 @@ function buildNamedStyleReq(type: string, color: string, size: number, bold: boo
           spaceBelow: { magnitude: below, unit: "PT" },
         },
       },
-      fields: "textStyle.foregroundColor,textStyle.fontSize,textStyle.bold,textStyle.weightedFontFamily,paragraphStyle.spaceAbove,paragraphStyle.spaceBelow",
+      fields: "*",
     },
   };
 }
@@ -108,7 +108,7 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
       let cursor = 1; // Docs start at index 1
       const reqs: any[] = [];
       // Track tables for a second pass: { tableIndex, docCursor, headers, rows }
-      const tablesMeta: { insertedAt: number; headers: string[]; rows: string[][] }[] = [];
+      const tablesMeta: { headers: string[]; rows: string[][] }[] = [];
 
       for (const sec of (sections || [])) {
         // Heading
@@ -161,19 +161,9 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
           });
         }
 
-        // Table
+        // Tables: collect for second pass (can't track cursor after insertTable)
         if (sec.table) {
-          const { headers, rows } = sec.table;
-          const numRows = rows.length + 1;
-          reqs.push({
-            insertTable: { rows: numRows, columns: headers.length, location: { index: cursor } },
-          });
-          tablesMeta.push({ insertedAt: cursor, headers, rows });
-          // After insertTable, the cursor shifts by (rows * cols * 2 + rows + 1)
-          // We use a placeholder — actual cell fill done in second pass via separate batchUpdate
-          cursor += 1; // conservative: table at cursor, next content after \n
-          reqs.push({ insertText: { text: "\n", location: { index: cursor } } });
-          cursor += 1;
+          tablesMeta.push({ headers: sec.table.headers, rows: sec.table.rows });
         }
 
         // Section spacer
@@ -185,8 +175,31 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
         await docsRequest(accessToken, docId, "POST", ":batchUpdate", { requests: reqs });
       }
 
-      // 4. Fill table cells (second pass — needs re-read to get actual cell indices)
-      // Skip for now; table structure is created. Use batch_update_doc to fill cells.
+      // 4. Second pass: insert tables at end of document
+      // Re-fetch doc to get current end index, then insert each table
+      let tableInserted = 0;
+      for (const tbl of tablesMeta) {
+        const doc2 = await docsRequest(accessToken, docId) as any;
+        const body = doc2.body?.content || [];
+        // Find last paragraph end index
+        let endIdx = 1;
+        for (const el of body) {
+          const ei = el.endIndex ?? el.paragraph?.endIndex;
+          if (typeof ei === "number" && ei > endIdx) endIdx = ei;
+        }
+        // Insert table at endIdx - 1 (before the final newline)
+        const insertAt = Math.max(1, endIdx - 1);
+        await docsRequest(accessToken, docId, "POST", ":batchUpdate", {
+          requests: [{
+            insertTable: {
+              rows: tbl.rows.length + 1,
+              columns: tbl.headers.length,
+              location: { index: insertAt },
+            },
+          }],
+        });
+        tableInserted++;
+      }
 
       const tableCount = tablesMeta.length;
       return {
@@ -195,7 +208,7 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
           `ID: ${docId}`,
           `Theme: ${theme} | Fonts: ${fonts.heading} / ${fonts.body}`,
           `Sections: ${(sections||[]).length} | Tables: ${tableCount}`,
-          tableCount > 0 ? "Tables are created empty — use batch_update_doc to fill cells." : "",
+          tableCount > 0 ? `${tableInserted} table(s) inserted (empty). Use batch_update_doc to fill cells.` : "",
           `Link: ${docLink}`,
         ].filter(Boolean).join("\n") }],
       };
@@ -244,7 +257,6 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
       if (!resp.ok) throw new Error(`Upload failed: ${await resp.text()}`);
       const res = await resp.json() as { id: string; name: string; webViewLink: string };
 
-      // Apply named styles
       await docsRequest(accessToken, res.id, "POST", ":batchUpdate", { requests: [
         buildNamedStyleReq("NORMAL_TEXT", tok.normal.color,   tok.normal.fontSize,   false, fonts.body,    6, 3),
         buildNamedStyleReq("HEADING_1",   tok.heading1.color, tok.heading1.fontSize,  true,  fonts.heading, 16, 6),
