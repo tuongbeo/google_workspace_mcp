@@ -67,6 +67,162 @@ export function registerSlidesTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations.` }] };
   }));
 
+  server.tool("create_presentation_from_outline",
+    "Create a professional Google Slides presentation from a structured outline. " +
+    "Applies Anthropic PPTX design standards: 16:9 layout, consistent typography scale, " +
+    "10 color palettes and 4 font pairings from Anthropic PPTX skill, " +
+    "dark cover/section slides with light content slides (sandwich structure).",
+    {
+      title: z.string(),
+      theme: z.enum(["midnight_executive","ocean_gradient","forest_moss","coral_energy","charcoal_minimal","teal_trust","warm_terracotta"])
+        .optional().default("midnight_executive")
+        .describe("Color palette: midnight_executive=navy/ice-blue, ocean_gradient=deep-blue/teal, forest_moss=green, coral_energy=coral/navy, charcoal_minimal=dark-gray, teal_trust=teal/seafoam, warm_terracotta=terracotta/sand"),
+      font_pair: z.enum(["arial_black_arial","georgia_calibri","calibri","trebuchet_calibri"])
+        .optional().default("arial_black_arial")
+        .describe("Font pairing: arial_black_arial=bold modern, georgia_calibri=classic editorial, calibri=clean corporate, trebuchet_calibri=friendly"),
+      slides: z.array(z.object({
+        type: z.enum(["cover","section","bullets","two_column","big_number","quote"]),
+        title: z.string(),
+        subtitle: z.string().optional(),
+        bullets: z.array(z.string()).optional(),
+        bullets_right: z.array(z.string()).optional(),
+        stat: z.string().optional(),
+        stat_label: z.string().optional(),
+        quote_text: z.string().optional(),
+        quote_author: z.string().optional(),
+      })).min(1),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ title, theme = "midnight_executive", font_pair = "arial_black_arial", slides }) => {
+      const { accessToken } = await getCreds();
+
+      // Design tokens from Anthropic PPTX skill SKILL.md (exact hex values)
+      const PALETTES: Record<string, { p: string; s: string }> = {
+        midnight_executive: { p: '1E2761', s: 'CADCFC' },
+        forest_moss:        { p: '2C5F2D', s: '97BC62' },
+        coral_energy:       { p: 'F96167', s: 'F9E795' },
+        ocean_gradient:     { p: '065A82', s: '1C7293' },
+        charcoal_minimal:   { p: '36454F', s: 'F2F2F2' },
+        teal_trust:         { p: '028090', s: '00A896' },
+        warm_terracotta:    { p: 'B85042', s: 'E7E8D1' },
+      };
+      // Exact font names from Anthropic PPTX skill SKILL.md
+      const FONTS: Record<string, { h: string; b: string }> = {
+        arial_black_arial:  { h: 'Arial Black',  b: 'Arial'         },
+        georgia_calibri:    { h: 'Georgia',       b: 'Calibri'       },
+        calibri:            { h: 'Calibri',        b: 'Calibri Light' },
+        trebuchet_calibri:  { h: 'Trebuchet MS',  b: 'Calibri'       },
+      };
+      // Typography scale from PPTX SKILL.md: title=36-44pt, section=20-24pt, body=14-16pt, caption=10-12pt
+      const SZ = { coverTitle: 40, section: 36, slideTitle: 26, body: 16, bullet: 15, stat: 60, subtitle: 22, caption: 11 };
+      // Layout: 16:9 = 10"×5.625" = 9144000×5143500 EMU (pptxgenjs.md: "LAYOUT_16x9: 10"×5.625"")
+      const W = 9144000, H = 5143500, M = 457200, CW = W - 2*M;
+
+      const pal = PALETTES[theme];
+      const fnt = FONTS[font_pair];
+
+      function rgb(hex: string) { return { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 }; }
+      function bg(sid: string, hex: string) { return { updatePageProperties: { objectId: sid, pageProperties: { pageBackgroundFill: { solidFill: { color: { rgbColor: rgb(hex) } } } }, fields: 'pageBackgroundFill' } }; }
+      function uid(p: string) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2,5)}`; }
+      function tb(id: string, pid: string, x: number, y: number, w: number, h: number) {
+        return { createShape: { objectId: id, shapeType: 'TEXT_BOX', elementProperties: { pageObjectId: pid, size: { width: { magnitude: w, unit: 'EMU' }, height: { magnitude: h, unit: 'EMU' } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: 'EMU' } } } };
+      }
+      function rect(id: string, pid: string, x: number, y: number, w: number, h: number, hex: string) {
+        return [
+          { createShape: { objectId: id, shapeType: 'RECTANGLE', elementProperties: { pageObjectId: pid, size: { width: { magnitude: w, unit: 'EMU' }, height: { magnitude: h, unit: 'EMU' } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: 'EMU' } } } },
+          { updateShapeProperties: { objectId: id, shapeProperties: { shapeBackgroundFill: { solidFill: { color: { rgbColor: rgb(hex) } } } }, fields: 'shapeBackgroundFill' } },
+        ];
+      }
+      function ins(id: string, text: string) { return { insertText: { objectId: id, insertionIndex: 0, text } }; }
+      function sty(id: string, s: number, e: number, opts: { f?: string; sz?: number; c?: string; bold?: boolean; italic?: boolean }) {
+        const style: Record<string,unknown> = {};
+        const fields: string[] = [];
+        if (opts.f)    { style.fontFamily = opts.f; fields.push('fontFamily'); }
+        if (opts.sz)   { style.fontSize = { magnitude: opts.sz, unit: 'PT' }; fields.push('fontSize'); }
+        if (opts.c)    { style.foregroundColor = { opaqueColor: { rgbColor: rgb(opts.c) } }; fields.push('foregroundColor'); }
+        if (opts.bold !== undefined)   { style.bold   = opts.bold;   fields.push('bold'); }
+        if (opts.italic !== undefined) { style.italic = opts.italic; fields.push('italic'); }
+        return { updateTextStyle: { objectId: id, textRange: { type: 'FIXED_RANGE', startIndex: s, endIndex: e }, style, fields: fields.join(',') } };
+      }
+      function align(id: string, s: number, e: number, a: 'CENTER'|'START') {
+        return { updateParagraphStyle: { objectId: id, textRange: { type: 'FIXED_RANGE', startIndex: s, endIndex: e }, style: { alignment: a }, fields: 'alignment' } };
+      }
+
+      const pres = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as any;
+      const presId: string = pres.presentationId;
+      const defSlide = pres.slides?.[0]?.objectId;
+      const reqs: any[] = [];
+      if (defSlide) reqs.push({ deleteObject: { objectId: defSlide } });
+
+      for (const slide of slides) {
+        const sid = uid('sl');
+        reqs.push({ createSlide: { objectId: sid, slideLayoutReference: { predefinedLayout: 'BLANK' } } });
+
+        if (slide.type === 'cover') {
+          // PPTX skill: dark bg for title/cover slides
+          reqs.push(bg(sid, pal.p));
+          const tid = uid('t'); reqs.push(tb(tid, sid, M, Math.round(H*0.28), CW, Math.round(H*0.28)), ins(tid, slide.title), sty(tid, 0, slide.title.length, { f: fnt.h, sz: SZ.coverTitle, c: 'FFFFFF', bold: true }), align(tid, 0, slide.title.length, 'CENTER'));
+          if (slide.subtitle) { const subid = uid('s'); reqs.push(tb(subid, sid, M, Math.round(H*0.62), CW, Math.round(H*0.18)), ins(subid, slide.subtitle), sty(subid, 0, slide.subtitle.length, { f: fnt.b, sz: SZ.subtitle, c: pal.s }), align(subid, 0, slide.subtitle.length, 'CENTER')); }
+
+        } else if (slide.type === 'section') {
+          reqs.push(bg(sid, pal.p));
+          const tid = uid('t'); reqs.push(tb(tid, sid, M, Math.round(H*0.33), CW, Math.round(H*0.34)), ins(tid, slide.title), sty(tid, 0, slide.title.length, { f: fnt.h, sz: SZ.section, c: 'FFFFFF', bold: true }), align(tid, 0, slide.title.length, 'CENTER'));
+          if (slide.subtitle) { const subid = uid('s'); reqs.push(tb(subid, sid, M, Math.round(H*0.70), CW, Math.round(H*0.15)), ins(subid, slide.subtitle), sty(subid, 0, slide.subtitle.length, { f: fnt.b, sz: SZ.body, c: pal.s }), align(subid, 0, slide.subtitle.length, 'CENTER')); }
+
+        } else if (slide.type === 'bullets' || slide.type === 'two_column') {
+          // PPTX skill: light bg for content slides; top accent bar (NOT a line under title)
+          reqs.push(bg(sid, 'FFFFFF'));
+          const barid = uid('bar'); reqs.push(...rect(barid, sid, 0, 0, W, Math.round(H*0.17), pal.p));
+          const tid = uid('t'); reqs.push(tb(tid, sid, M, Math.round(H*0.03), CW, Math.round(H*0.13)), ins(tid, slide.title), sty(tid, 0, slide.title.length, { f: fnt.h, sz: SZ.slideTitle, c: 'FFFFFF', bold: true }));
+
+          if (slide.type === 'bullets' && slide.bullets?.length) {
+            const bid = uid('b'); const bt = slide.bullets.join('\n');
+            reqs.push(tb(bid, sid, M, Math.round(H*0.21), CW, Math.round(H*0.70)), ins(bid, bt));
+            let idx = 0;
+            for (const b of slide.bullets) { reqs.push(sty(bid, idx, idx+b.length, { f: fnt.b, sz: SZ.bullet, c: '1F2937' }), align(bid, idx, idx+b.length, 'START')); idx += b.length+1; }
+          } else if (slide.type === 'two_column') {
+            const cw = Math.round(CW*0.46), gap = Math.round(CW*0.08);
+            if (slide.bullets?.length) {
+              const lid = uid('l'); const lt = slide.bullets.join('\n');
+              reqs.push(tb(lid, sid, M, Math.round(H*0.21), cw, Math.round(H*0.70)), ins(lid, lt));
+              let idx = 0; for (const b of slide.bullets) { reqs.push(sty(lid, idx, idx+b.length, { f: fnt.b, sz: SZ.bullet, c: '1F2937' })); idx += b.length+1; }
+            }
+            if (slide.bullets_right?.length) {
+              const rid = uid('r'); const rt = slide.bullets_right.join('\n');
+              reqs.push(tb(rid, sid, M+cw+gap, Math.round(H*0.21), cw, Math.round(H*0.70)), ins(rid, rt));
+              let idx = 0; for (const b of slide.bullets_right) { reqs.push(sty(rid, idx, idx+b.length, { f: fnt.b, sz: SZ.bullet, c: '1F2937' })); idx += b.length+1; }
+            }
+          }
+
+        } else if (slide.type === 'big_number') {
+          // PPTX skill: "Large stat callouts (big numbers 60-72pt with small labels below)"
+          reqs.push(bg(sid, 'FFFFFF'));
+          const tid = uid('t'); reqs.push(tb(tid, sid, M, Math.round(H*0.07), CW, Math.round(H*0.15)), ins(tid, slide.title), sty(tid, 0, slide.title.length, { f: fnt.h, sz: SZ.slideTitle, c: pal.p, bold: true }), align(tid, 0, slide.title.length, 'CENTER'));
+          if (slide.stat) { const sid2 = uid('st'); reqs.push(tb(sid2, sid, M, Math.round(H*0.27), CW, Math.round(H*0.42)), ins(sid2, slide.stat), sty(sid2, 0, slide.stat.length, { f: fnt.h, sz: SZ.stat, c: pal.p, bold: true }), align(sid2, 0, slide.stat.length, 'CENTER')); }
+          if (slide.stat_label) { const lid = uid('lb'); reqs.push(tb(lid, sid, M, Math.round(H*0.72), CW, Math.round(H*0.15)), ins(lid, slide.stat_label), sty(lid, 0, slide.stat_label.length, { f: fnt.b, sz: SZ.body, c: '6B7280' }), align(lid, 0, slide.stat_label.length, 'CENTER')); }
+
+        } else if (slide.type === 'quote') {
+          reqs.push(bg(sid, pal.p));
+          const qt = `"${slide.quote_text || slide.title}"`;
+          const qid = uid('q'); reqs.push(tb(qid, sid, M, Math.round(H*0.2), CW, Math.round(H*0.45)), ins(qid, qt), sty(qid, 0, qt.length, { f: fnt.b, sz: SZ.subtitle, c: 'FFFFFF', italic: true }), align(qid, 0, qt.length, 'CENTER'));
+          if (slide.quote_author) { const ad = `— ${slide.quote_author}`; const aid = uid('a'); reqs.push(tb(aid, sid, M, Math.round(H*0.70), CW, Math.round(H*0.14)), ins(aid, ad), sty(aid, 0, ad.length, { f: fnt.b, sz: SZ.body, c: pal.s }), align(aid, 0, ad.length, 'CENTER')); }
+        }
+      }
+
+      await slidesRequest(accessToken, presId, ":batchUpdate", "POST", { requests: reqs });
+      return { content: [{ type: "text", text: [
+        `Presentation created: "${title}"`,
+        `ID: ${presId}`,
+        `Theme: ${theme} | Fonts: ${fnt.h} / ${fnt.b}`,
+        `Slides: ${slides.length}`,
+        `URL: https://docs.google.com/presentation/d/${presId}/edit`,
+        "",
+        "Slide outline:",
+        ...slides.map((s,i) => `  ${i+1}. [${s.type}] ${s.title}`),
+      ].join("\n") }] };
+    })
+  );
+
   server.tool("delete_slide", "Delete a slide from a presentation.", {
     presentation_id: z.string(),
     slide_object_id: z.string().describe("Object ID of the slide to delete"),
