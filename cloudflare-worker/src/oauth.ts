@@ -227,8 +227,25 @@ npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
     );
   }
 
-  // Store Google tokens in TOKENS_KV
-  const sub = crypto.randomUUID();
+  // Fetch Google user's stable sub via userinfo
+  let sub: string;
+  try {
+    const userinfoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${googleTokens.access_token}` },
+    });
+    if (userinfoRes.ok) {
+      const userinfo = await userinfoRes.json() as { sub?: string };
+      sub = userinfo.sub || crypto.randomUUID();
+      console.log(`[callback] Got stable sub=${sub} from Google userinfo`);
+    } else {
+      sub = crypto.randomUUID();
+      console.warn(`[callback] userinfo fetch failed (${userinfoRes.status}), using random sub`);
+    }
+  } catch (e) {
+    sub = crypto.randomUUID();
+    console.warn(`[callback] userinfo fetch error, using random sub:`, e);
+  }
+
   await storeTokens(
     sub,
     googleTokens.access_token,
@@ -242,7 +259,7 @@ npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
   // Issue proxy JWT and store as pending for /token to collect (TTL 2 min)
   const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
   const tempCode = crypto.randomUUID();
-  await env.OAUTH_KV.put(`pending_jwt:${tempCode}`, proxyJWT, { expirationTtl: 300 });
+  await env.OAUTH_KV.put(`pending_jwt:${tempCode}`, proxyJWT, { expirationTtl: 600 });
 
   console.log(`[callback] SUCCESS sub=${sub}, tempCode=${tempCode}`);
 

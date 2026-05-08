@@ -81,8 +81,9 @@ export async function verifyJWT(
 // ── Token Manager — lưu/đọc/refresh từ KV ────────────────────────────────────
 
 const KV_TOKEN_PREFIX = "token:";
+const KV_LOCK_PREFIX = "lock:refresh:";
 const KV_TOKEN_TTL = 90 * 24 * 3600;  // 90 ngày
-const REFRESH_THRESHOLD = 5 * 60;      // Refresh sớm nếu còn < 5 phút
+const REFRESH_THRESHOLD = 10 * 60;     // Refresh sớm nếu còn < 10 phút (tăng từ 5)
 
 export async function storeTokens(
   sub: string,
@@ -106,6 +107,76 @@ export async function storeTokens(
     expirationTtl: KV_TOKEN_TTL,
   });
   console.log(`[TokenManager] Stored Google tokens for sub=${sub}, expires_in=${expiresIn}s`);
+}
+
+// ── Internal: refresh với retry logic ───────────────────────────────────────
+
+async function refreshWithRetry(
+  record: StoredTokenRecord,
+  sub: string,
+  googleClientId: string,
+  googleClientSecret: string,
+  kv: KVNamespace,
+  retries = 2,
+): Promise<StoredTokenRecord> {
+  let lastErr: Error = new Error("Unknown error");
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, 1000 * attempt)); // delay 1s, 2s
+    }
+
+    const res = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: googleClientId,
+        client_secret: googleClientSecret,
+        refresh_token: record.refresh_token,
+      }).toString(),
+    });
+
+    if (res.ok) {
+      const newTokens = await res.json() as {
+        access_token: string;
+        expires_in?: number;
+        refresh_token?: string;
+      };
+
+      const updated: StoredTokenRecord = {
+        access_token: newTokens.access_token,
+        refresh_token: newTokens.refresh_token || record.refresh_token,
+        expires_at: Math.floor(Date.now() / 1000) + (newTokens.expires_in || 3600),
+        scopes: record.scopes,
+        google_client_id: googleClientId,
+        google_client_secret: googleClientSecret,
+      };
+
+      await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(updated), {
+        expirationTtl: KV_TOKEN_TTL,
+      });
+      console.log(`[TokenManager] Google token refreshed for sub=${sub} (attempt ${attempt + 1})`);
+      return updated;
+    }
+
+    const errText = await res.text();
+    let errBody: { error?: string } = {};
+    try { errBody = JSON.parse(errText); } catch {}
+
+    // Permanent error — xóa token ngay, không retry
+    if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
+      console.warn(`[TokenManager] Permanent auth failure (${errBody.error}) for sub=${sub}, removing token.`);
+      await kv.delete(`${KV_TOKEN_PREFIX}${sub}`);
+      throw new Error(`Token refresh permanently failed: ${errBody.error}. User must re-authenticate.`);
+    }
+
+    // Transient error (429, 5xx) — retry
+    console.warn(`[TokenManager] Transient refresh error (${res.status}) for sub=${sub}, attempt ${attempt + 1}/${retries + 1}: ${errText}`);
+    lastErr = new Error(`Token refresh failed (${res.status}): ${errText}`);
+  }
+
+  throw lastErr;
 }
 
 export async function getValidAccessToken(
@@ -138,55 +209,25 @@ export async function getValidAccessToken(
     throw new Error(`Token expired, no refresh token for sub=${sub}. User must re-authenticate.`);
   }
 
-  console.log(`[TokenManager] Refreshing Google token for sub=${sub}...`);
-
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: googleClientId,
-      client_secret: googleClientSecret,
-      refresh_token: record.refresh_token,
-    }).toString(),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    console.error(`[TokenManager] Google refresh failed for sub=${sub}: ${err}`);
-
-    // Chỉ xóa KV khi lỗi permanent (token bị revoke), không xóa khi lỗi tạm thời
-    let errBody: { error?: string } = {};
-    try { errBody = JSON.parse(err); } catch {}
-    if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
-      console.warn(`[TokenManager] Permanent auth failure (${errBody.error}) for sub=${sub}, removing token.`);
-      await kv.delete(`${KV_TOKEN_PREFIX}${sub}`);
-    }
-
-    throw new Error(`Token refresh failed (${res.status}). User must re-authenticate.`);
+  // Refresh locking — chỉ 1 concurrent request thực sự refresh, các request khác dùng token hiện tại
+  const lockKey = `${KV_LOCK_PREFIX}${sub}`;
+  const existingLock = await kv.get(lockKey);
+  if (existingLock) {
+    console.log(`[TokenManager] Refresh lock active for sub=${sub}, using current token`);
+    return record.access_token;
   }
 
-  const newTokens = await res.json() as {
-    access_token: string;
-    expires_in?: number;
-    refresh_token?: string;
-  };
+  // Set lock trước khi refresh (TTL 30s)
+  await kv.put(lockKey, "1", { expirationTtl: 30 });
 
-  const updated: StoredTokenRecord = {
-    access_token: newTokens.access_token,
-    refresh_token: newTokens.refresh_token || record.refresh_token,
-    expires_at: Math.floor(Date.now() / 1000) + (newTokens.expires_in || 3600),
-    scopes: record.scopes,
-    google_client_id: googleClientId,
-    google_client_secret: googleClientSecret,
-  };
-
-  await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(updated), {
-    expirationTtl: KV_TOKEN_TTL,
-  });
-
-  console.log(`[TokenManager] Google token refreshed successfully for sub=${sub}`);
-  return updated.access_token;
+  console.log(`[TokenManager] Refreshing Google token for sub=${sub}...`);
+  try {
+    const updated = await refreshWithRetry(record, sub, googleClientId, googleClientSecret, kv);
+    return updated.access_token;
+  } finally {
+    // Xóa lock dù thành công hay thất bại
+    await kv.delete(lockKey).catch(() => {});
+  }
 }
 
 export async function extractSub(

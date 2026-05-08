@@ -135,5 +135,21 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
 
   const response = await transport.handleRequest(patchedRequest);
   await server.close();
-  return response;
+
+  // Inject stable Mcp-Session-Id based on Google user sub
+  const headers = new Headers(response.headers);
+  headers.set("Mcp-Session-Id", `google-workspace-${sub}`);
+  // Expose the header so browsers/clients can read it
+  const existing = headers.get("Access-Control-Expose-Headers") || "";
+  if (!existing.includes("Mcp-Session-Id")) {
+    headers.set("Access-Control-Expose-Headers",
+      existing ? `${existing}, Mcp-Session-Id` : "Mcp-Session-Id"
+    );
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
