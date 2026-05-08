@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sheetsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import { getTheme, hexToSheetsRgb } from "../styles";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
@@ -167,8 +168,8 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
         headers: z.array(z.string()).describe("Column header labels"),
         rows: z.array(z.array(z.string())).describe("Data rows (2D string array)"),
       })).min(1),
-      theme: z.enum(["blue", "green", "gray", "orange"]).optional().default("blue")
-        .describe("Header color: blue=corporate, green=growth, gray=minimal, orange=energy"),
+      theme: z.enum(["corporate", "modern", "warm", "nature", "minimal", "vibrant", "blue", "green", "gray", "orange"]).optional().default("corporate")
+        .describe("Color theme: corporate (default), modern, warm, nature, minimal, vibrant. Legacy aliases: blue=corporate, green=nature, gray=minimal, orange=warm"),
       number_format_columns: z.array(z.object({
         col_index: z.number().int().min(0).describe("0-based column index"),
         format: z.enum(["currency", "percent", "number", "date", "multiple"])
@@ -176,20 +177,20 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
       })).optional().describe("Anthropic financial number formats for specific columns"),
     },
     { readOnlyHint: false },
-    withErrorHandler(async ({ title, sheets, theme = "blue", number_format_columns }) => {
+    withErrorHandler(async ({ title, sheets, theme = "corporate", number_format_columns }) => {
       const { accessToken } = await getCreds();
-      const THEMES = {
-        blue:   { header_bg: "1A56DB", header_text: "FFFFFF", alt_bg: "EBF5FF" },
-        green:  { header_bg: "057A55", header_text: "FFFFFF", alt_bg: "F3FAF7" },
-        gray:   { header_bg: "374151", header_text: "FFFFFF", alt_bg: "F9FAFB" },
-        orange: { header_bg: "C2410C", header_text: "FFFFFF", alt_bg: "FFF7ED" },
-      } as const;
+      // Use shared styles module — resolves legacy aliases automatically
+      const themeColors = getTheme(theme);
+      const t = {
+        header_bg:   themeColors.primary.replace("#", ""),
+        header_text: "FFFFFF",
+        alt_bg:      themeColors.primaryLight.replace("#", ""),
+      };
+      function hexRgb(hex: string) { return hexToSheetsRgb("#" + hex.replace("#", "")); }
       const NUMBER_FORMATS: Record<string, string> = {
         currency: '$#,##0;($#,##0);"-"', percent: '0.0%', number: '#,##0',
         date: 'MM/DD/YYYY', multiple: '0.0"x"',
       };
-      const t = THEMES[theme];
-      function hexRgb(hex: string) { return { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 }; }
       function colLetter(n: number): string { return n < 26 ? String.fromCharCode(65+n) : String.fromCharCode(64+Math.floor(n/26)) + String.fromCharCode(65+(n%26)); }
       const created = await googleFetch("https://sheets.googleapis.com/v4/spreadsheets", accessToken, "POST",
         { properties: { title }, sheets: sheets.map((s,i) => ({ properties: { title: s.name, index: i } })) }) as any;
