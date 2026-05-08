@@ -21,6 +21,7 @@ import { registerSlidesExtendedTools } from "./tools/slides";
 import { registerDocsAdvancedTools } from "./tools/docs-advanced";
 import { registerDriveRevisionsTools } from "./tools/drive-revisions";
 import { registerCompositeTools } from "./tools/composite";
+import { registerSheetsPhase2Tools } from "./tools/sheets-phase2";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -75,7 +76,8 @@ function getOrCreateServer(env: Env): McpServer {
   registerDocsAdvancedTools(server, getCreds);   // +11 tools (Phase 5: named ranges, footnotes, images, styling, suggestions)
   registerDriveRevisionsTools(server, getCreds); // +6 tools (Phase 6: Drive version control)
   registerCompositeTools(server, getCreds);      // +2 tools (Phase 2A: create_rich_doc, import_markdown_as_doc)
-  // ──────────────────────────────────────────── Total: ~169 tools ──
+  registerSheetsPhase2Tools(server, getCreds);   // +9 tools (Phase 2B: charts, validation, sort, merge, pivot, props, filter, protected, batch)
+  // ──────────────────────────────────────────── Total: ~178 tools ──
 
   _server = server;
   _searchEnv = env;
