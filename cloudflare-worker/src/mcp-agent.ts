@@ -22,6 +22,9 @@ import { registerDocsAdvancedTools } from "./tools/docs-advanced";
 import { registerDriveRevisionsTools } from "./tools/drive-revisions";
 import { registerCompositeTools } from "./tools/composite";
 import { registerSheetsPhase2Tools } from "./tools/sheets-phase2";
+import { registerDocsPhase2Tools } from "./tools/docs-phase2";
+import { registerSlidesPhase2Tools } from "./tools/slides-phase2";
+import { registerAppsScriptPhase2Tools } from "./tools/appsscript-phase2";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -77,7 +80,10 @@ function getOrCreateServer(env: Env): McpServer {
   registerDriveRevisionsTools(server, getCreds); // +6 tools (Phase 6: Drive version control)
   registerCompositeTools(server, getCreds);      // +2 tools (Phase 2A: create_rich_doc, import_markdown_as_doc)
   registerSheetsPhase2Tools(server, getCreds);   // +9 tools (Phase 2B: charts, validation, sort, merge, pivot, props, filter, protected, batch)
-  // ──────────────────────────────────────────── Total: ~178 tools ──
+  registerDocsPhase2Tools(server, getCreds);     // +3 tools (Phase 2C: manage_table_cells, section_break, delete_bullets)
+  registerSlidesPhase2Tools(server, getCreds);   // +4 tools (Phase 2D: create_shape, create_line, group_objects, update_shape_properties)
+  registerAppsScriptPhase2Tools(server, getCreds); // +1 tool (Phase 2E: manage_triggers)
+  // ──────────────────────────────────────────── Total: ~185 tools ──
 
   _server = server;
   _searchEnv = env;
