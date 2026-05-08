@@ -155,6 +155,109 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
     });
     return { content: [{ type: "text", text: `Formatting applied to range (rows ${start_row}-${end_row}, cols ${start_col}-${end_col}).` }] };
   }));
+
+  server.tool("create_formatted_spreadsheet",
+    "Create a new Google Spreadsheet with professional formatting in one call. " +
+    "Applies Anthropic XLSX standards: bold colored header row, alternating data rows, " +
+    "cell borders, frozen row 1, auto-resize columns, and optional financial number formats.",
+    {
+      title: z.string().describe("Spreadsheet title"),
+      sheets: z.array(z.object({
+        name: z.string().describe("Sheet tab name"),
+        headers: z.array(z.string()).describe("Column header labels"),
+        rows: z.array(z.array(z.string())).describe("Data rows (2D string array)"),
+      })).min(1),
+      theme: z.enum(["blue", "green", "gray", "orange"]).optional().default("blue")
+        .describe("Header color: blue=corporate, green=growth, gray=minimal, orange=energy"),
+      number_format_columns: z.array(z.object({
+        col_index: z.number().int().min(0).describe("0-based column index"),
+        format: z.enum(["currency", "percent", "number", "date", "multiple"])
+          .describe("currency=$#,##0 | percent=0.0% | number=#,##0 | date=MM/DD/YYYY | multiple=0.0x"),
+      })).optional().describe("Anthropic financial number formats for specific columns"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ title, sheets, theme = "blue", number_format_columns }) => {
+      const { accessToken } = await getCreds();
+      const THEMES = {
+        blue:   { header_bg: "1A56DB", header_text: "FFFFFF", alt_bg: "EBF5FF" },
+        green:  { header_bg: "057A55", header_text: "FFFFFF", alt_bg: "F3FAF7" },
+        gray:   { header_bg: "374151", header_text: "FFFFFF", alt_bg: "F9FAFB" },
+        orange: { header_bg: "C2410C", header_text: "FFFFFF", alt_bg: "FFF7ED" },
+      } as const;
+      const NUMBER_FORMATS: Record<string, string> = {
+        currency: '$#,##0;($#,##0);"-"', percent: '0.0%', number: '#,##0',
+        date: 'MM/DD/YYYY', multiple: '0.0"x"',
+      };
+      const t = THEMES[theme];
+      function hexRgb(hex: string) { return { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 }; }
+      function colLetter(n: number): string { return n < 26 ? String.fromCharCode(65+n) : String.fromCharCode(64+Math.floor(n/26)) + String.fromCharCode(65+(n%26)); }
+      const created = await googleFetch("https://sheets.googleapis.com/v4/spreadsheets", accessToken, "POST",
+        { properties: { title }, sheets: sheets.map((s,i) => ({ properties: { title: s.name, index: i } })) }) as any;
+      const spreadsheetId: string = created.spreadsheetId;
+      const createdSheets: any[] = created.sheets;
+      const allReqs: any[] = [];
+      for (let si = 0; si < sheets.length; si++) {
+        const sheet = sheets[si];
+        const sheetId: number = createdSheets[si].properties.sheetId;
+        const numCols = sheet.headers.length;
+        const numDataRows = sheet.rows.length;
+        const totalRows = numDataRows + 1;
+        const values = [sheet.headers, ...sheet.rows];
+        const range = `${sheet.name}!A1:${colLetter(numCols-1)}${totalRows}`;
+        await sheetsRequest(accessToken, spreadsheetId, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values });
+        allReqs.push({ repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: numCols },
+          cell: { userEnteredFormat: {
+            backgroundColor: hexRgb(t.header_bg),
+            textFormat: { foregroundColor: hexRgb(t.header_text), bold: true, fontSize: 11, fontFamily: "Arial" },
+            horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE", wrapStrategy: "WRAP",
+          }},
+          fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+        }});
+        if (numDataRows > 0) {
+          allReqs.push({ repeatCell: {
+            range: { sheetId, startRowIndex: 1, endRowIndex: totalRows, startColumnIndex: 0, endColumnIndex: numCols },
+            cell: { userEnteredFormat: { textFormat: { fontSize: 11, fontFamily: "Arial" }, verticalAlignment: "MIDDLE", wrapStrategy: "WRAP" }},
+            fields: "userEnteredFormat(textFormat,verticalAlignment,wrapStrategy)",
+          }});
+          for (let r = 1; r < numDataRows; r += 2) {
+            allReqs.push({ repeatCell: {
+              range: { sheetId, startRowIndex: r+1, endRowIndex: r+2, startColumnIndex: 0, endColumnIndex: numCols },
+              cell: { userEnteredFormat: { backgroundColor: hexRgb(t.alt_bg) }},
+              fields: "userEnteredFormat.backgroundColor",
+            }});
+          }
+        }
+        const border = { style: "SOLID", width: 1, color: { red: 0.82, green: 0.84, blue: 0.87 } };
+        allReqs.push({ updateBorders: { range: { sheetId, startRowIndex: 0, endRowIndex: totalRows, startColumnIndex: 0, endColumnIndex: numCols }, top: border, bottom: border, left: border, right: border, innerHorizontal: border, innerVertical: border }});
+        allReqs.push({ updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1 } }, fields: "gridProperties.frozenRowCount" }});
+        allReqs.push({ autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: numCols } }});
+        allReqs.push({ updateDimensionProperties: { range: { sheetId, dimension: "ROWS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 32 }, fields: "pixelSize" }});
+        for (const nf of number_format_columns ?? []) {
+          if (nf.col_index < numCols && numDataRows > 0) {
+            allReqs.push({ repeatCell: {
+              range: { sheetId, startRowIndex: 1, endRowIndex: totalRows, startColumnIndex: nf.col_index, endColumnIndex: nf.col_index+1 },
+              cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: NUMBER_FORMATS[nf.format] }}},
+              fields: "userEnteredFormat.numberFormat",
+            }});
+          }
+        }
+      }
+      if (allReqs.length) await sheetsRequest(accessToken, spreadsheetId, ":batchUpdate", "POST", { requests: allReqs });
+      return { content: [{ type: "text", text: [
+        `Spreadsheet created: "${title}"`,
+        `ID: ${spreadsheetId}`,
+        `Theme: ${theme} | Font: Arial | Format: Anthropic standard`,
+        `URL: https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+        "",
+        "Sheets:",
+        ...sheets.map(s => `  • "${s.name}": ${s.headers.length} cols × ${s.rows.length} rows`),
+        "",
+        `Applied: header styling, alternating rows, borders, frozen row 1, auto-resize${number_format_columns?.length ? `, ${number_format_columns.length} number format(s)` : ""}.`,
+      ].join("\n") }] };
+    })
+  );
+
 }
 
 // ─── Additional tools to match upstream ──────────────────────────────────────

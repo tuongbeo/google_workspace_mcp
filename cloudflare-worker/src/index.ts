@@ -61,6 +61,21 @@ app.get("/callback", async (c) => handleCallback(c.req.raw, c.env));
 app.post("/token", async (c) => handleToken(c.req.raw, c.env));
 
 // ── MCP Endpoint (Streamable HTTP — stateless) ────────────────────────────────
+// BUG-002 FIX: Handle OPTIONS preflight BEFORE auth check.
+// Without this, browser-based MCP clients receive 401 on preflight and abort.
+app.options("/mcp", (c) => {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Mcp-Session-Id",
+      "Access-Control-Expose-Headers": "Mcp-Session-Id",
+      "Access-Control-Max-Age": "86400",
+    },
+  });
+});
+
 app.all("/mcp", async (c) => {
   const env = c.env;
   const auth = c.req.header("Authorization") || "";
@@ -83,6 +98,8 @@ app.all("/mcp", async (c) => {
   // Validate proxy JWT
   const payload = await verifyJWT(token, env.JWT_SECRET);
   if (!payload) {
+    // BUG-001 FIX: Include WWW-Authenticate on ALL 401 responses (RFC 6750)
+    // Without this header, Claude.ai does not trigger the re-authentication flow
     return new Response(
       JSON.stringify({
         error: "invalid_token",
@@ -90,7 +107,14 @@ app.all("/mcp", async (c) => {
       }),
       {
         status: 401,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": [
+            `Bearer realm="${env.PUBLIC_BASE_URL}"`,
+            `error="invalid_token"`,
+            `resource_metadata_url="${env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
+          ].join(", "),
+        },
       }
     );
   }

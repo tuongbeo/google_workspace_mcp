@@ -8,6 +8,82 @@ import { withErrorHandler } from "../utils/tool-handler";
 
 type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
+// ── Markdown → HTML converter ──────────────────────────────────────────────
+// Design tokens from Anthropic DOCX skill:
+//   Font: Arial | H1=16pt #111827 | H2=14pt | H3=12pt | body=11pt 1.4x
+//   Table: border #D1D5DB, header-bg #F3F4F6, cell padding 6pt 8pt
+// text/html upload gives far better Google Docs conversion quality than text/markdown
+// BUG-003 FIX: Replaced greedy underscore regex (?<![*_])_(.+?)_(?![*_]) with
+// boundary-aware pattern (^|\s)_..._( |$) to avoid corrupting URLs and snake_case.
+function markdownToHtml(md: string): string {
+  const lines = md.split('\n');
+  const parts: string[] = [
+    '<!DOCTYPE html><html><head><meta charset="utf-8"></head>',
+    '<body style="font-family:Arial,sans-serif;font-size:11pt;color:#111827;line-height:1.4">',
+  ];
+  let inList: '' | 'ul' | 'ol' = '';
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+  let tableOpen = false;
+  let tableHeaderDone = false;
+
+  const inline = (text: string): string =>
+    text
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__(.+?)__/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      // BUG-003 FIX: only match _word_ when surrounded by word boundaries,
+      // not inside URLs (https://x.com/my_file) or snake_case identifiers.
+      .replace(/(^|\s)_([^_\s][^_]*[^_\s])_(?=\s|$)/g, '$1<em>$2</em>')
+      .replace(/`([^`]+)`/g, '<code style="font-family:\'Courier New\',monospace;background:#F3F4F6;padding:1pt 3pt;font-size:10pt">$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  const closeList = () => { if (inList) { parts.push(`</${inList}>`); inList = ''; } };
+  const closeTable = () => { if (tableOpen) { parts.push('</tbody></table>'); tableOpen = false; tableHeaderDone = false; } };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('```')) {
+      if (!inCodeBlock) { closeList(); closeTable(); inCodeBlock = true; codeLines = []; }
+      else {
+        const esc = codeLines.join('\n').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        parts.push(`<pre style="font-family:\'Courier New\',monospace;background:#F3F4F6;padding:8pt;font-size:10pt;border-radius:4pt"><code>${esc}</code></pre>`);
+        inCodeBlock = false;
+      }
+      continue;
+    }
+    if (inCodeBlock) { codeLines.push(line); continue; }
+    if (line.startsWith('|')) {
+      closeList();
+      const cells = line.split('|').slice(1,-1).map((c: string)=>c.trim());
+      if (cells.every((c: string)=>/^[-: ]+$/.test(c))) { tableHeaderDone = true; continue; }
+      if (!tableOpen) { parts.push('<table style="border-collapse:collapse;width:100%;margin:8pt 0;font-size:11pt"><thead>'); tableOpen = true; }
+      const isHdr = !tableHeaderDone;
+      const tag = isHdr ? 'th' : 'td';
+      const cs = isHdr ? 'border:1pt solid #D1D5DB;padding:6pt 8pt;background:#F3F4F6;font-weight:bold;text-align:left' : 'border:1pt solid #D1D5DB;padding:6pt 8pt;text-align:left';
+      parts.push(`<tr>${cells.map((c: string)=>`<${tag} style="${cs}">${inline(c)}</${tag}>`).join('')}</tr>`);
+      if (isHdr) parts.push('</thead><tbody>');
+      continue;
+    }
+    if (tableOpen && !line.startsWith('|')) closeTable();
+    if (line.startsWith('#### ')) { closeList(); parts.push(`<h4 style="font-family:Arial;font-size:11pt;font-weight:bold;color:#374151;margin:8pt 0 4pt">${inline(line.slice(5))}</h4>`); continue; }
+    if (line.startsWith('### '))  { closeList(); parts.push(`<h3 style="font-family:Arial;font-size:12pt;font-weight:bold;color:#1F2937;margin:10pt 0 5pt">${inline(line.slice(4))}</h3>`); continue; }
+    if (line.startsWith('## '))   { closeList(); parts.push(`<h2 style="font-family:Arial;font-size:14pt;font-weight:bold;color:#111827;margin:12pt 0 6pt">${inline(line.slice(3))}</h2>`); continue; }
+    if (line.startsWith('# '))    { closeList(); parts.push(`<h1 style="font-family:Arial;font-size:16pt;font-weight:bold;color:#111827;margin:16pt 0 8pt">${inline(line.slice(2))}</h1>`); continue; }
+    if (line.startsWith('> '))    { closeList(); parts.push(`<blockquote style="border-left:4pt solid #D1D5DB;margin:8pt 0;padding:4pt 12pt;color:#6B7280;font-style:italic">${inline(line.slice(2))}</blockquote>`); continue; }
+    if (/^[-*_]{3,}$/.test(line.trim())) { closeList(); parts.push('<hr style="border:none;border-top:1pt solid #D1D5DB;margin:12pt 0">'); continue; }
+    if (/^[-*+] /.test(line)) { if (inList!=='ul'){closeList();parts.push('<ul style="margin:4pt 0;padding-left:18pt">');inList='ul';} parts.push(`<li style="margin:3pt 0">${inline(line.slice(2))}</li>`); continue; }
+    if (/^\d+\. /.test(line)) { if (inList!=='ol'){closeList();parts.push('<ol style="margin:4pt 0;padding-left:18pt">');inList='ol';} parts.push(`<li style="margin:3pt 0">${inline(line.replace(/^\d+\. /,''))}</li>`); continue; }
+    if (!line.trim()) { closeList(); parts.push('<p style="margin:4pt 0"> </p>'); continue; }
+    closeList();
+    parts.push(`<p style="margin:4pt 0;font-size:11pt">${inline(line)}</p>`);
+  }
+  closeList(); closeTable();
+  parts.push('</body></html>');
+  return parts.join('\n');
+}
+
 export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_drive_files", "List files and folders in Google Drive.", {
@@ -108,22 +184,53 @@ export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `File created: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
   }));
 
-  server.tool("import_to_google_doc", "Import a text/markdown file as a Google Doc.", {
-    name: z.string(),
-    content: z.string().describe("Markdown or plain text content"),
-    parent_folder_id: z.string().optional(),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ name, content, parent_folder_id }) => {
-    const { accessToken } = await getCreds();
-    const metadata: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.document" };
-    if (parent_folder_id) metadata.parents = [parent_folder_id];
-    const form = new FormData();
-    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-    form.append("file", new Blob([content], { type: "text/markdown" }));
-    const resp = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink", { method: "POST", headers: { Authorization: `Bearer ${accessToken}` }, body: form });
-    if (!resp.ok) throw new Error(`Import failed: ${await resp.text()}`);
-    const result = await resp.json() as any;
-    return { content: [{ type: "text", text: `Imported as Google Doc: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
-  }));
+  server.tool("import_to_google_doc",
+    "Import markdown or plain text as a Google Doc with professional formatting. " +
+    "Applies Anthropic document standards (Arial, H1=16pt, H2=14pt, H3=12pt, body=11pt, " +
+    "table borders, code blocks, links) via Google Drive's HTML converter.",
+    {
+      name: z.string(),
+      content: z.string().describe("Markdown or plain text content"),
+      parent_folder_id: z.string().optional(),
+      input_format: z.enum(["markdown", "html", "plain"]).optional().default("markdown")
+        .describe("markdown=convert to styled HTML (best quality); html=upload as-is; plain=raw text"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ name, content, parent_folder_id, input_format = "markdown" }) => {
+      const { accessToken } = await getCreds();
+      let uploadContent: string;
+      let contentType: string;
+      if (input_format === "markdown") {
+        uploadContent = markdownToHtml(content);
+        contentType = "text/html";
+      } else if (input_format === "html") {
+        uploadContent = content;
+        contentType = "text/html";
+      } else {
+        uploadContent = content;
+        contentType = "text/plain";
+      }
+      const metadata: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.document" };
+      if (parent_folder_id) metadata.parents = [parent_folder_id];
+      const form = new FormData();
+      form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+      form.append("file", new Blob([uploadContent], { type: contentType }));
+      const resp = await fetch(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink",
+        { method: "POST", headers: { Authorization: `Bearer ${accessToken}` }, body: form }
+      );
+      if (!resp.ok) throw new Error(`Import failed: ${await resp.text()}`);
+      const result = await resp.json() as any;
+      return {
+        content: [{ type: "text", text: [
+          `Imported as Google Doc: "${result.name}"`,
+          `ID: ${result.id}`,
+          `Format: ${input_format} → ${contentType}`,
+          `Link: ${result.webViewLink}`,
+        ].join("\n") }],
+      };
+    })
+  );
 
   server.tool("update_drive_file", "Update a Drive file's metadata (name, description, move to folder).", {
     file_id: z.string(),

@@ -58,9 +58,9 @@ function getOrCreateServer(env: Env): McpServer {
   registerDriveExtraTools(server, getCreds);     // +2 tools (download URL, public access)
   registerDocsTools(server, getCreds);           // 13 tools
   registerDocsExtraTools(server, getCreds);      // +8 tools (search, tabs, table, headers)
-  registerSheetsTools(server, getCreds);         // 8 tools
+  registerSheetsTools(server, getCreds);         // 9 tools (includes create_formatted_spreadsheet)
   registerSheetsExtraTools(server, getCreds);    // +1 tool (conditional formatting)
-  registerSlidesTools(server, getCreds);         // 5 tools
+  registerSlidesTools(server, getCreds);         // 6 tools (includes create_presentation_from_outline)
   registerSlidesExtendedTools(server, getCreds); // +18 Slides tools
   registerChatTools(server, getCreds);           // 4 tools
   registerTasksTools(server, getCreds);          // 9 tools
@@ -73,7 +73,7 @@ function getOrCreateServer(env: Env): McpServer {
   registerWorkspaceExtraTools(server, getCreds); // +6 tools
   registerDocsAdvancedTools(server, getCreds);   // +11 tools (Phase 5: named ranges, footnotes, images, styling, suggestions)
   registerDriveRevisionsTools(server, getCreds); // +6 tools (Phase 6: Drive version control)
-  // ──────────────────────────────────────────── Total: ~164 tools ──
+  // ──────────────────────────────────────────── Total: ~167 tools ──
 
   _server = server;
   _searchEnv = env;
@@ -101,7 +101,7 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   try {
     accessToken = await getValidAccessToken(
       sub,
-      env.OAUTH_KV,
+      env.TOKENS_KV,                 // Google tokens lưu trong TOKENS_KV (tách khỏi OAUTH_KV)
       env.GOOGLE_OAUTH_CLIENT_ID,    // fallback cho tokens cũ (trước khi multi-tenant upgrade)
       env.GOOGLE_OAUTH_CLIENT_SECRET,
     );

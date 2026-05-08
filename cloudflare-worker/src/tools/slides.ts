@@ -131,7 +131,8 @@ export function registerSlidesExtendedTools(server: McpServer, getCreds: GetCred
       const transform: any = { scaleX: 1, scaleY: 1, unit: "EMU" };
       if (x !== undefined) transform.translateX = x;
       if (y !== undefined) transform.translateY = y;
-      requests.push({ updatePageElementTransform: { objectId: object_id, transform, applyMode: "RELATIVE" } });
+      // BUG-005 FIX: Use ABSOLUTE mode so x/y SET the position rather than ADD to existing position
+      requests.push({ updatePageElementTransform: { objectId: object_id, transform, applyMode: "ABSOLUTE" } });
     }
     if (width !== undefined || height !== undefined) {
       const size: any = {};
