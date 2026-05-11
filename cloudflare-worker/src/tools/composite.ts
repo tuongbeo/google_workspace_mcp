@@ -276,50 +276,195 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
 } // end registerCompositeTools
 
 // ── Markdown → HTML converter for Google Docs import ─────────────────────────
+// Fixes applied:
+//   [Fix 3] Escape char pre-processing  — unescape \# \* \| etc. before parsing
+//   [Fix 1] Markdown table parser       — |table|syntax| → <table><tr><td>
+//   [Fix 2] Blank line normalization    — skip empty lines, let block elements handle spacing
+//   [Fix 4] Bold markers in headings    — strip ** from heading text (heading already bold)
 
-function markdownToDocHtml(md: string, tok: ReturnType<typeof deriveDocTokens>, fonts: { heading: string; body: string }): string {
+function markdownToDocHtml(
+  md: string,
+  tok: ReturnType<typeof deriveDocTokens>,
+  fonts: { heading: string; body: string },
+): string {
+  // ── Fix 3: Unescape markdown escape sequences before any processing ──────
+  md = md.replace(/\\([#*|`_~\[\](){}+\-.!])/g, (_, ch: string) => ch);
+
   const lines = md.split("\n");
   let html = `<html><head><meta charset="utf-8">
 <style>
-  body { font-family: '${fonts.body}', Arial, sans-serif; font-size: 11pt; color: ${tok.normal.color}; }
-  h1 { font-family: '${fonts.heading}'; font-size: ${tok.heading1.fontSize}pt; color: ${tok.heading1.color}; }
-  h2 { font-family: '${fonts.heading}'; font-size: ${tok.heading2.fontSize}pt; color: ${tok.heading2.color}; }
-  h3 { font-family: '${fonts.heading}'; font-size: ${tok.heading3.fontSize}pt; color: ${tok.heading3.color}; }
-  h4 { font-family: '${fonts.heading}'; font-size: ${tok.heading4.fontSize}pt; color: ${tok.heading4.color}; }
-  table { border-collapse: collapse; width: 100%; }
-  th { background: ${tok.tableHeader.bgColor}; color: ${tok.tableHeader.textColor}; padding: 6px 8px; font-weight: bold; }
-  td { border: 1px solid ${tok.tableAltRow.bgColor}; padding: 5px 8px; }
-  code { background: #f4f4f4; padding: 2px 4px; font-family: monospace; }
-  pre  { background: #f4f4f4; padding: 12px; }
+  body  { font-family: '${fonts.body}', Arial, sans-serif; font-size: 11pt; color: ${tok.normal.color}; margin: 36px; }
+  h1    { font-family: '${fonts.heading}'; font-size: ${tok.heading1.fontSize}pt; color: ${tok.heading1.color}; margin: 16pt 0 6pt; }
+  h2    { font-family: '${fonts.heading}'; font-size: ${tok.heading2.fontSize}pt; color: ${tok.heading2.color}; margin: 12pt 0 4pt; }
+  h3    { font-family: '${fonts.heading}'; font-size: ${tok.heading3.fontSize}pt; color: ${tok.heading3.color}; margin:  8pt 0 3pt; }
+  h4    { font-family: '${fonts.heading}'; font-size: ${tok.heading4.fontSize}pt; color: ${tok.heading4.color}; margin:  6pt 0 2pt; }
+  table { border-collapse: collapse; width: 100%; margin: 8pt 0; }
+  th    { background: ${tok.tableHeader.bgColor}; color: ${tok.tableHeader.textColor}; padding: 6px 10px; font-weight: bold; border: 1px solid #ccc; text-align: left; }
+  td    { border: 1px solid #ccc; padding: 5px 10px; }
+  tr:nth-child(even) td { background: ${tok.tableAltRow.bgColor}; }
+  code  { background: #f4f4f4; padding: 2px 4px; font-family: monospace; font-size: 10pt; }
+  pre   { background: #f4f4f4; padding: 12px; border-radius: 4px; }
+  p     { margin: 0 0 6pt; line-height: 1.4; }
+  ul, ol { margin: 4pt 0 6pt 20px; padding: 0; }
+  li    { margin-bottom: 3pt; }
 </style></head><body>\n`;
-  let inList = false, inOl = false, inPre = false;
-  for (let i = 0; i < lines.length; i++) {
+
+  let inList = false;
+  let inOl   = false;
+  let inPre  = false;
+  let i = 0;
+
+  while (i < lines.length) {
     const line = lines[i];
-    if (line.startsWith("```")) { inPre = !inPre; html += inPre ? "<pre><code>" : "</code></pre>\n"; continue; }
-    if (inPre) { html += escHtml(line) + "\n"; continue; }
-    const bullet = line.match(/^(\s*[-*+])\s+(.*)/);
-    const ol     = line.match(/^(\s*\d+\.)\s+(.*)/);
-    if (!bullet && inList)  { html += "</ul>\n"; inList = false; }
-    if (!ol    && inOl)     { html += "</ol>\n"; inOl   = false; }
-    if (bullet) { if (!inList) { html += "<ul>\n"; inList = true; } html += `<li>${inlineFormat(bullet[2])}</li>\n`; continue; }
-    if (ol)     { if (!inOl)   { html += "<ol>\n"; inOl   = true; } html += `<li>${inlineFormat(ol[2])}</li>\n`;   continue; }
+
+    // ── Code block toggle ──────────────────────────────────────────────────
+    if (line.startsWith("```")) {
+      inPre = !inPre;
+      html += inPre ? "<pre><code>" : "</code></pre>\n";
+      i++; continue;
+    }
+    if (inPre) { html += escHtml(line) + "\n"; i++; continue; }
+
+    // ── Fix 2: Skip blank / whitespace-only lines ──────────────────────────
+    // Block elements (h1-h4, table, ul, ol, p) carry their own spacing.
+    // <p></p> for every blank line creates unwanted empty paragraphs in Google Docs.
+    if (line.trim() === "") {
+      if (inList) { html += "</ul>\n"; inList = false; }
+      if (inOl)   { html += "</ol>\n"; inOl   = false; }
+      i++; continue;
+    }
+
+    // ── Fix 1: Detect and convert markdown table blocks ───────────────────
+    // A table starts with a pipe row followed immediately by a separator row.
+    if (isTableRow(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      if (inList) { html += "</ul>\n"; inList = false; }
+      if (inOl)   { html += "</ol>\n"; inOl   = false; }
+
+      // Collect: header row + separator row + all consecutive data rows
+      const tableLines: string[] = [line, lines[i + 1]];
+      let j = i + 2;
+      while (j < lines.length && isTableRow(lines[j])) {
+        tableLines.push(lines[j]);
+        j++;
+      }
+      html += buildHtmlTable(tableLines);
+      i = j; continue;
+    }
+
+    // ── Lists ──────────────────────────────────────────────────────────────
+    const isBullet = /^\s*[-*+]\s+/.test(line);
+    const isOlItem = /^\s*\d+\.\s+/.test(line);
+    if (!isBullet && inList) { html += "</ul>\n"; inList = false; }
+    if (!isOlItem && inOl)   { html += "</ol>\n"; inOl   = false; }
+
+    if (isBullet) {
+      const m = line.match(/^\s*[-*+]\s+(.*)/);
+      if (!inList) { html += "<ul>\n"; inList = true; }
+      html += `<li>${inlineFormat(m![1])}</li>\n`;
+      i++; continue;
+    }
+    if (isOlItem) {
+      const m = line.match(/^\s*\d+\.\s+(.*)/);
+      if (!inOl) { html += "<ol>\n"; inOl = true; }
+      html += `<li>${inlineFormat(m![1])}</li>\n`;
+      i++; continue;
+    }
+
+    // ── Headings — Fix 4: strip redundant ** / __ wrappers ────────────────
     const hm = line.match(/^(#{1,4})\s+(.*)/);
-    if (hm) { html += `<h${hm[1].length}>${inlineFormat(hm[2])}</h${hm[1].length}>\n`; continue; }
-    if (line.startsWith("---") || line.startsWith("***")) { html += "<hr>\n"; continue; }
-    if (line.trim() === "") { html += "<p></p>\n"; continue; }
+    if (hm) {
+      const level = hm[1].length;
+      const headingText = hm[2]
+        .replace(/^\*\*(.+)\*\*$/, "$1")
+        .replace(/^__(.+)__$/, "$1");
+      html += `<h${level}>${inlineFormat(headingText)}</h${level}>\n`;
+      i++; continue;
+    }
+
+    // ── Horizontal rule ────────────────────────────────────────────────────
+    if (/^(\*\*\*|---|___)\s*$/.test(line)) {
+      html += "<hr>\n"; i++; continue;
+    }
+
+    // ── Regular paragraph ──────────────────────────────────────────────────
     html += `<p>${inlineFormat(line)}</p>\n`;
+    i++;
   }
+
   if (inList) html += "</ul>\n";
   if (inOl)   html += "</ol>\n";
   html += "</body></html>";
   return html;
 }
 
-function escHtml(s: string) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-function inlineFormat(s: string) {
+// ── Table helpers ─────────────────────────────────────────────────────────────
+
+/** True if this line looks like a markdown table row: starts and ends with | */
+function isTableRow(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("|") && t.endsWith("|") && t.length > 2;
+}
+
+/**
+ * True if this line is a markdown table separator row.
+ * Valid examples: |---|  |:---:|  |---:|  | :--- |
+ */
+function isTableSeparator(line: string): boolean {
+  const t = line.trim();
+  if (!t.startsWith("|") || !t.endsWith("|")) return false;
+  // Remove all valid separator characters; nothing should remain
+  return t.replace(/[\s|:\-]/g, "").length === 0;
+}
+
+/** Split a markdown table row into trimmed cell strings */
+function parseTableRow(line: string): string[] {
+  return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(c => c.trim());
+}
+
+/**
+ * Build a complete HTML <table> from collected markdown table lines.
+ * lines[0] = header row
+ * lines[1] = separator row (used for column alignment only)
+ * lines[2..] = data rows
+ */
+function buildHtmlTable(lines: string[]): string {
+  const headers    = parseTableRow(lines[0]);
+  const alignments = parseTableRow(lines[1]).map(cell => {
+    const c = cell.trim();
+    if (c.startsWith(":") && c.endsWith(":")) return "center";
+    if (c.endsWith(":")) return "right";
+    return "left";
+  });
+
+  let html = "<table>\n<thead>\n<tr>\n";
+  headers.forEach((h, j) => {
+    html += `  <th style="text-align:${alignments[j] ?? "left"}">${inlineFormat(h)}</th>\n`;
+  });
+  html += "</tr>\n</thead>\n<tbody>\n";
+
+  for (let r = 2; r < lines.length; r++) {
+    const cells = parseTableRow(lines[r]);
+    html += "<tr>\n";
+    cells.forEach((c, j) => {
+      html += `  <td style="text-align:${alignments[j] ?? "left"}">${inlineFormat(c)}</td>\n`;
+    });
+    html += "</tr>\n";
+  }
+
+  html += "</tbody>\n</table>\n";
+  return html;
+}
+
+// ── Inline formatting helpers ─────────────────────────────────────────────────
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function inlineFormat(s: string): string {
   return s
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g,     "<em>$1</em>")
-    .replace(/`(.+?)`/g,       "<code>$1</code>")
+    .replace(/\*\*(.+?)\*\*/g,     "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g,          "<em>$1</em>")
+    .replace(/`(.+?)`/g,            "<code>$1</code>")
     .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
 }
