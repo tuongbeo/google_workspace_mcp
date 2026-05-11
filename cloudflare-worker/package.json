@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
@@ -14,7 +17,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260313.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.9.3",
+    "vitest": "^2.1.9",
     "wrangler": "4.73.0"
   }
 }
