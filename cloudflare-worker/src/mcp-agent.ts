@@ -158,18 +158,5 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   const response = await transport.handleRequest(patchedRequest);
   await transport.close();
 
-  const headers = new Headers(response.headers);
-  headers.set("Mcp-Session-Id", `google-workspace-${sub}`);
-  const existing = headers.get("Access-Control-Expose-Headers") || "";
-  if (!existing.includes("Mcp-Session-Id")) {
-    headers.set("Access-Control-Expose-Headers",
-      existing ? `${existing}, Mcp-Session-Id` : "Mcp-Session-Id"
-    );
-  }
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+  return response;
 }
