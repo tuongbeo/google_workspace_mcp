@@ -127,19 +127,19 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
 
   let server = getOrCreateServer(env);
 
-  // Stable session ID per Google user — allows Claude.ai to maintain session continuity
-  const sessionId = `google-workspace-${sub}`;
-
   const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => sessionId,
+    // Stateless mode: each request is independent. Do NOT use sessionIdGenerator here —
+    // stateful mode would require each new per-request transport to know prior session state,
+    // which isn't possible in a stateless Workers architecture.
+    sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
 
   try {
     await server.connect(transport);
   } catch (connectErr) {
-    // If the singleton server is in a broken state (e.g. previously closed),
-    // reset it and create a fresh one.
+    // Singleton may be stuck in connected state (e.g. previous transport was not closed).
+    // Reset and recreate.
     console.warn("[mcp-agent] server.connect() failed, recreating server:", connectErr);
     _server = null;
     _searchEnv = null;
@@ -160,11 +160,11 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
 
   const response = await transport.handleRequest(patchedRequest);
 
-  // CRITICAL: Do NOT call server.close() here!
-  // The McpServer is a singleton reused across warm isolate requests.
-  // Calling close() marks it as permanently closed, breaking all subsequent
-  // requests in the same Cloudflare Worker isolate (~10-15 min warm lifetime).
-  // The transport is garbage collected after the response is sent.
+  // Close the transport (NOT server.close) so Protocol._transport is cleared
+  // and the next request can connect a fresh transport to the singleton server.
+  // This is equivalent to the original server.close() but doesn't risk
+  // triggering any "closed" flag on the McpServer itself.
+  await transport.close();
 
   // Inject stable Mcp-Session-Id based on Google user sub
   const headers = new Headers(response.headers);

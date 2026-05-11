@@ -9,7 +9,8 @@
  *   GET  /authorize                              → OAuth authorize (redirect sang Google)
  *   GET  /callback                               → OAuth callback từ Google
  *   POST /token                                  → Exchange auth code → proxy JWT
- *   ALL  /mcp                                    → MCP Streamable HTTP endpoint (stateless)
+ *   POST /mcp                                    → MCP Streamable HTTP endpoint (stateless)
+ *   GET  /mcp                                    → 405 (SSE not supported in stateless mode)
  */
 
 import { Hono } from "hono";
@@ -33,8 +34,7 @@ app.get("/health", (c) =>
     status: "ok",
     service: "mcp-google-workspace",
     version: "1.0.0",
-    transport: "streamable-http",
-    stateless: true,
+    transport: "streamable-http-stateless",
     timestamp: new Date().toISOString(),
   })
 );
@@ -61,6 +61,7 @@ app.get("/callback", async (c) => handleCallback(c.req.raw, c.env));
 app.post("/token", async (c) => handleToken(c.req.raw, c.env));
 
 // ── MCP Endpoint (Streamable HTTP — stateless) ────────────────────────────────
+
 // BUG-002 FIX: Handle OPTIONS preflight BEFORE auth check.
 // Without this, browser-based MCP clients receive 401 on preflight and abort.
 app.options("/mcp", (c) => {
@@ -68,13 +69,45 @@ app.options("/mcp", (c) => {
     status: 204,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Mcp-Session-Id",
       "Access-Control-Expose-Headers": "Mcp-Session-Id",
       "Access-Control-Max-Age": "86400",
     },
   });
 });
+
+// BUG-003 FIX: Reject GET /mcp (SSE long-poll) with 405 Method Not Allowed.
+//
+// Root cause of the "connection expired after 10-15 min" issue:
+//   1. Claude.ai periodically sends GET /mcp to establish an SSE long-poll stream
+//      for receiving server-initiated notifications.
+//   2. The MCP transport (enableJsonResponse: true) handles GET by creating a
+//      ReadableStream SSE response that is intended to stay open indefinitely.
+//   3. After transport.handleRequest() returns, transport.close() is called to
+//      clean up Protocol._transport so the next POST request can connect.
+//   4. transport.close() calls cleanup() on all SSE streams, immediately closing
+//      the ReadableStream. Claude.ai receives an SSE connection that opens and
+//      closes instantly.
+//   5. Claude.ai retries GET /mcp repeatedly. After ~10-15 min of failed SSE
+//      attempts, it declares the connection "expired."
+//
+// Fix: Return 405 for GET /mcp. Per MCP Streamable HTTP spec §6.3.2, servers
+// that do not support persistent SSE SHOULD respond with 405. Claude.ai will
+// fall back to pure stateless POST mode with no SSE dependency.
+app.get("/mcp", (c) => new Response(null, {
+  status: 405,
+  headers: {
+    "Allow": "POST, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+  },
+}));
+
+// Also reject DELETE /mcp — session termination is not needed in stateless mode.
+app.delete("/mcp", (c) => new Response(null, {
+  status: 405,
+  headers: { "Allow": "POST, OPTIONS" },
+}));
 
 app.all("/mcp", async (c) => {
   const env = c.env;
@@ -136,7 +169,7 @@ app.notFound((c) =>
         "GET /authorize",
         "GET /callback",
         "POST /token",
-        "ALL /mcp",
+        "POST /mcp",
       ],
     },
     404
