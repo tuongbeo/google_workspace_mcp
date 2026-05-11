@@ -265,53 +265,75 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
         buildNamedStyleReq("HEADING_3",   tok.heading3.color, tok.heading3.fontSize,  true,  fonts.heading, 8,  3),
       ]});
 
-      // ── Pass 3: Apply column alignment to table cells ──────────────────────
-      // Google Docs overrides CSS text-align on import; use batchUpdate to set
-      // per-cell paragraph alignment from the original markdown separator row.
+      // ── Pass 3: Column widths + alignment via single batchUpdate ─────────────
+      // Google Docs overrides CSS on import; use the Docs API to apply both
+      // proportional column widths and per-cell paragraph alignment.
       const tableAlignments = extractTableAlignments(content);
-      if (tableAlignments.length > 0) {
-        // Fetch doc structure to locate all table cell paragraphs
+      const tableWidths     = extractTableWidths(content);
+      const numTables       = Math.max(tableAlignments.length, tableWidths.length);
+
+      if (numTables > 0) {
+        // Fetch doc structure — need startIndex for updateTableColumnProperties
         const doc = await docsRequest(accessToken, res.id) as any;
         const bodyContent: any[] = doc.body?.content ?? [];
 
-        // Collect table elements in document order
-        const docTables: any[] = bodyContent
+        // Collect table elements WITH their body start indices
+        const docTableEls: { table: any; startIndex: number }[] = bodyContent
           .filter((el: any) => !!el.table)
-          .map((el: any) => el.table);
+          .map((el: any) => ({ table: el.table, startIndex: el.startIndex ?? 0 }));
 
-        const alignReqs: any[] = [];
+        const batchReqs: any[] = [];
 
-        for (let t = 0; t < Math.min(docTables.length, tableAlignments.length); t++) {
-          const table  = docTables[t];
+        for (let t = 0; t < Math.min(docTableEls.length, numTables); t++) {
+          const { table, startIndex } = docTableEls[t];
           const aligns = tableAlignments[t];
+          const widths = tableWidths[t];
 
-          for (const row of (table.tableRows ?? [])) {
-            for (let c = 0; c < (row.tableCells ?? []).length; c++) {
-              const cell  = row.tableCells[c];
-              const align = aligns[c] ?? "START";
-              // Skip START (left) — that is the default; only override CENTER / END
-              if (align === "START") continue;
+          // — Column widths —
+          if (widths) {
+            for (let c = 0; c < widths.length; c++) {
+              batchReqs.push({
+                updateTableColumnProperties: {
+                  tableStartLocation: { index: startIndex },
+                  columnIndices: [c],
+                  tableColumnProperties: {
+                    widthType: "FIXED_WIDTH",
+                    width: { magnitude: widths[c], unit: "PT" },
+                  },
+                  fields: "width,widthType",
+                },
+              });
+            }
+          }
 
-              for (const cellEl of (cell.content ?? [])) {
-                if (cellEl.paragraph) {
-                  alignReqs.push({
-                    updateParagraphStyle: {
-                      range: {
-                        startIndex: cellEl.startIndex,
-                        endIndex:   cellEl.endIndex,
+          // — Cell paragraph alignment (CENTER / END only; START is default) —
+          if (aligns) {
+            for (const row of (table.tableRows ?? [])) {
+              for (let c = 0; c < (row.tableCells ?? []).length; c++) {
+                const cell  = row.tableCells[c];
+                const align = aligns[c] ?? "START";
+                if (align === "START") continue;
+                for (const cellEl of (cell.content ?? [])) {
+                  if (cellEl.paragraph) {
+                    batchReqs.push({
+                      updateParagraphStyle: {
+                        range: {
+                          startIndex: cellEl.startIndex,
+                          endIndex:   cellEl.endIndex,
+                        },
+                        paragraphStyle: { alignment: align },
+                        fields: "alignment",
                       },
-                      paragraphStyle: { alignment: align },
-                      fields: "alignment",
-                    },
-                  });
+                    });
+                  }
                 }
               }
             }
           }
         }
 
-        if (alignReqs.length > 0) {
-          await docsRequest(accessToken, res.id, "POST", ":batchUpdate", { requests: alignReqs });
+        if (batchReqs.length > 0) {
+          await docsRequest(accessToken, res.id, "POST", ":batchUpdate", { requests: batchReqs });
         }
       }
 
@@ -319,7 +341,7 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
         `✅ Imported as styled Google Doc: "${res.name}"`,
         `ID: ${res.id}`,
         `Theme: ${theme} | Fonts: ${fonts.heading} / ${fonts.body}`,
-        `Tables with alignment: ${tableAlignments.length}`,
+        `Tables: ${numTables} (widths + alignment applied)`,
         `Link: ${res.webViewLink}`,
       ].join("\n") }] };
     }),
@@ -545,17 +567,13 @@ function inlineFormat(s: string): string {
 // Values are Google Docs paragraph alignment strings: "START" | "CENTER" | "END".
 
 function extractTableAlignments(md: string): string[][] {
-  // Mirror the same escape pre-processing used in markdownToDocHtml
   md = md.replace(/\\([#*|`_~\[\](){}+\-.!])/g, (_, ch: string) => ch);
-
   const lines  = md.split("\n");
   const result: string[][] = [];
   let i = 0;
-
   while (i < lines.length) {
     const line = lines[i];
     if (isTableRow(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
-      // Map separator notation → Docs API alignment
       const aligns = parseTableRow(lines[i + 1]).map(cell => {
         const c = cell.trim();
         if (c.startsWith(":") && c.endsWith(":")) return "CENTER";
@@ -563,12 +581,68 @@ function extractTableAlignments(md: string): string[][] {
         return "START";
       });
       result.push(aligns);
-      // Advance past all rows of this table
       i += 2;
       while (i < lines.length && isTableRow(lines[i])) i++;
-    } else {
-      i++;
-    }
+    } else { i++; }
+  }
+  return result;
+}
+
+/**
+ * Compute proportional column widths (in PT) for each markdown table.
+ *
+ * Strategy:
+ *   1. Find max content length per column across all rows (chars).
+ *   2. Apply sqrt() to compress extremes — wide columns stay wide but
+ *      narrow columns aren't crushed to unusable size.
+ *   3. Give every column a guaranteed MIN_PT floor; distribute the remaining
+ *      page width proportionally by sqrt score.
+ *   4. Normalise to exactly pageWidthPt to avoid drift.
+ *
+ * Default page width = 468pt (US Letter 612pt − 2 × 72pt margins).
+ */
+function extractTableWidths(md: string, pageWidthPt = 468): number[][] {
+  md = md.replace(/\\([#*|`_~\[\](){}+\-.!])/g, (_, ch: string) => ch);
+  const lines  = md.split("\n");
+  const result: number[][] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (isTableRow(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      // Collect all rows of this table
+      const tableLines: string[] = [line, lines[i + 1]];
+      let j = i + 2;
+      while (j < lines.length && isTableRow(lines[j])) { tableLines.push(lines[j]); j++; }
+
+      const numCols = parseTableRow(tableLines[0]).length;
+      const maxLens = new Array(numCols).fill(0) as number[];
+
+      // Max content length per column (skip separator row at index 1)
+      for (let r = 0; r < tableLines.length; r++) {
+        if (r === 1) continue;
+        parseTableRow(tableLines[r]).forEach((cell, c) => {
+          if (c < numCols) maxLens[c] = Math.max(maxLens[c], cell.length);
+        });
+      }
+
+      // sqrt compression + MIN_PT floor
+      const MIN_PT      = 48;
+      const sqrts       = maxLens.map(l => Math.sqrt(Math.max(l, 1)));
+      const sqrtSum     = sqrts.reduce((a, b) => a + b, 0);
+      const distributable = Math.max(0, pageWidthPt - MIN_PT * numCols);
+
+      const widths = sqrts.map(s =>
+        Math.round(MIN_PT + (s / sqrtSum) * distributable)
+      );
+
+      // Fix rounding drift so columns sum to exactly pageWidthPt
+      const drift = pageWidthPt - widths.reduce((a, b) => a + b, 0);
+      widths[widths.length - 1] += drift;
+
+      result.push(widths);
+      i = j;
+    } else { i++; }
   }
   return result;
 }
