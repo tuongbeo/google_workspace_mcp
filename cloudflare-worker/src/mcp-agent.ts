@@ -1,9 +1,9 @@
 /**
  * MCP Server handler — Google Workspace (Full tool coverage v2)
  *
- * Performance optimisation: McpServer + tool registration happens once at
- * module load time (warm isolate reuse). Only the getCreds closure — which
- * captures the per-request access token — is request-scoped.
+ * Architecture: fresh McpServer per request (matches stable March 26 design).
+ * Tool registration is fast (~1ms for 193 tools) so no meaningful overhead.
+ * Avoids all singleton-related state issues with concurrent requests.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -34,23 +34,59 @@ import {
   registerWorkspaceExtraTools,
 } from "./tools/workspace";
 
-// ── Module-level token store (request-scoped, mutated per request) ────────────
-let _currentAccessToken = "";
-const getCreds = async () => ({ accessToken: _currentAccessToken });
+function unauthorizedResponse(publicBaseUrl: string): Response {
+  return new Response(
+    JSON.stringify({ error: "unauthorized", error_description: "Token expired or revoked. Please re-authenticate." }),
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": [`Bearer realm="${publicBaseUrl}"`, `resource_metadata_url="${publicBaseUrl}/.well-known/oauth-protected-resource"`].join(", "),
+      },
+    }
+  );
+}
 
-// ── McpServer singleton — registered once, reused across warm requests ────────
-let _server: McpServer | null = null;
-let _searchEnv: Env | null = null;
+export async function handleMcpRequest(request: Request, env: Env): Promise<Response> {
+  const sub = await extractSub(request, env.JWT_SECRET);
+  if (!sub) {
+    console.warn("[mcp] No valid sub in JWT — returning 401");
+    return unauthorizedResponse(env.PUBLIC_BASE_URL);
+  }
 
-function getOrCreateServer(env: Env): McpServer {
-  if (_server && _searchEnv === env) return _server;
+  // Diagnostic: log the JSON-RPC method being called
+  try {
+    const cloned = request.clone();
+    const body = await cloned.json() as { method?: string } | Array<{ method?: string }>;
+    const method = Array.isArray(body) ? body.map(m => m.method).join(",") : body.method;
+    console.log(`[mcp] POST jsonrpc=${method} sub=${sub}`);
+  } catch {
+    console.log(`[mcp] POST (non-JSON body) sub=${sub}`);
+  }
 
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken(
+      sub,
+      env.TOKENS_KV,
+      env.GOOGLE_OAUTH_CLIENT_ID,
+      env.GOOGLE_OAUTH_CLIENT_SECRET,
+    );
+  } catch (err) {
+    console.error("[mcp] getValidAccessToken failed:", err);
+    return unauthorizedResponse(env.PUBLIC_BASE_URL);
+  }
+
+  // Fresh McpServer per request — same design as stable March 26 build.
+  // Avoids singleton state accumulation and race conditions with double-initialize.
   const server = new McpServer({
     name: "mcp-google-workspace",
     version: "2.1.0",
     category: "Productivity",
     logoUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/3840px-Google_%22G%22_logo.svg.png",
   } as any);
+
+  const getCreds = async () => ({ accessToken });
 
   registerGmailTools(server, getCreds);
   registerGmailExtraTools(server, getCreds);
@@ -81,68 +117,12 @@ function getOrCreateServer(env: Env): McpServer {
   registerAppsScriptPhase2Tools(server, getCreds);
   registerConsolidatedTools(server, getCreds);
 
-  _server = server;
-  _searchEnv = env;
-  return server;
-}
-
-function unauthorizedResponse(publicBaseUrl: string): Response {
-  return new Response(
-    JSON.stringify({ error: "unauthorized", error_description: "Token expired or revoked. Please re-authenticate." }),
-    {
-      status: 401,
-      headers: {
-        "Content-Type": "application/json",
-        "WWW-Authenticate": [`Bearer realm="${publicBaseUrl}"`, `resource_metadata_url="${publicBaseUrl}/.well-known/oauth-protected-resource"`].join(", "),
-      },
-    }
-  );
-}
-
-export async function handleMcpRequest(request: Request, env: Env): Promise<Response> {
-  const sub = await extractSub(request, env.JWT_SECRET);
-  if (!sub) {
-    console.warn("[mcp] No valid sub in JWT — returning 401");
-    return unauthorizedResponse(env.PUBLIC_BASE_URL);
-  }
-
-  // Diagnostic: log the JSON-RPC method being called
-  try {
-    const cloned = request.clone();
-    const body = await cloned.json() as { method?: string } | Array<{ method?: string }>;
-    const method = Array.isArray(body) ? body.map(m => m.method).join(",") : body.method;
-    console.log(`[mcp] ${request.method} jsonrpc=${method} sub=${sub}`);
-  } catch {
-    console.log(`[mcp] ${request.method} (non-JSON body) sub=${sub}`);
-  }
-
-  let accessToken: string;
-  try {
-    accessToken = await getValidAccessToken(
-      sub, env.TOKENS_KV, env.GOOGLE_OAUTH_CLIENT_ID, env.GOOGLE_OAUTH_CLIENT_SECRET,
-    );
-  } catch (err) {
-    console.error("[mcp] getValidAccessToken failed:", err);
-    return unauthorizedResponse(env.PUBLIC_BASE_URL);
-  }
-
-  _currentAccessToken = accessToken;
-  let server = getOrCreateServer(env);
-
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
 
-  try {
-    await server.connect(transport);
-  } catch (connectErr) {
-    console.warn("[mcp] server.connect() failed, recreating:", connectErr);
-    _server = null;
-    _searchEnv = null;
-    server = getOrCreateServer(env);
-    await server.connect(transport);
-  }
+  await server.connect(transport);
 
   const patchedRequest = new Request(request, {
     headers: (() => {
@@ -156,7 +136,6 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   });
 
   const response = await transport.handleRequest(patchedRequest);
-  await transport.close();
-
+  await server.close();
   return response;
 }
