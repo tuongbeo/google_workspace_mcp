@@ -257,6 +257,7 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
       if (!resp.ok) throw new Error(`Upload failed: ${await resp.text()}`);
       const res = await resp.json() as { id: string; name: string; webViewLink: string };
 
+      // ── Pass 2: Apply named styles (theme + font) ──────────────────────────
       await docsRequest(accessToken, res.id, "POST", ":batchUpdate", { requests: [
         buildNamedStyleReq("NORMAL_TEXT", tok.normal.color,   tok.normal.fontSize,   false, fonts.body,    6, 3),
         buildNamedStyleReq("HEADING_1",   tok.heading1.color, tok.heading1.fontSize,  true,  fonts.heading, 16, 6),
@@ -264,10 +265,61 @@ export function registerCompositeTools(server: McpServer, getCreds: GetCredsFunc
         buildNamedStyleReq("HEADING_3",   tok.heading3.color, tok.heading3.fontSize,  true,  fonts.heading, 8,  3),
       ]});
 
+      // ── Pass 3: Apply column alignment to table cells ──────────────────────
+      // Google Docs overrides CSS text-align on import; use batchUpdate to set
+      // per-cell paragraph alignment from the original markdown separator row.
+      const tableAlignments = extractTableAlignments(content);
+      if (tableAlignments.length > 0) {
+        // Fetch doc structure to locate all table cell paragraphs
+        const doc = await docsRequest(accessToken, res.id) as any;
+        const bodyContent: any[] = doc.body?.content ?? [];
+
+        // Collect table elements in document order
+        const docTables: any[] = bodyContent
+          .filter((el: any) => !!el.table)
+          .map((el: any) => el.table);
+
+        const alignReqs: any[] = [];
+
+        for (let t = 0; t < Math.min(docTables.length, tableAlignments.length); t++) {
+          const table  = docTables[t];
+          const aligns = tableAlignments[t];
+
+          for (const row of (table.tableRows ?? [])) {
+            for (let c = 0; c < (row.tableCells ?? []).length; c++) {
+              const cell  = row.tableCells[c];
+              const align = aligns[c] ?? "START";
+              // Skip START (left) — that is the default; only override CENTER / END
+              if (align === "START") continue;
+
+              for (const cellEl of (cell.content ?? [])) {
+                if (cellEl.paragraph) {
+                  alignReqs.push({
+                    updateParagraphStyle: {
+                      range: {
+                        startIndex: cellEl.startIndex,
+                        endIndex:   cellEl.endIndex,
+                      },
+                      paragraphStyle: { alignment: align },
+                      fields: "alignment",
+                    },
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        if (alignReqs.length > 0) {
+          await docsRequest(accessToken, res.id, "POST", ":batchUpdate", { requests: alignReqs });
+        }
+      }
+
       return { content: [{ type: "text", text: [
         `✅ Imported as styled Google Doc: "${res.name}"`,
         `ID: ${res.id}`,
         `Theme: ${theme} | Fonts: ${fonts.heading} / ${fonts.body}`,
+        `Tables with alignment: ${tableAlignments.length}`,
         `Link: ${res.webViewLink}`,
       ].join("\n") }] };
     }),
@@ -486,4 +538,37 @@ function inlineFormat(s: string): string {
     .replace(/\*(.+?)\*/g,          "<em>$1</em>")
     .replace(/`(.+?)`/g,            "<code>$1</code>")
     .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
+}
+
+// ── extractTableAlignments ────────────────────────────────────────────────────
+// Scan markdown and return one alignment array per table found (document order).
+// Values are Google Docs paragraph alignment strings: "START" | "CENTER" | "END".
+
+function extractTableAlignments(md: string): string[][] {
+  // Mirror the same escape pre-processing used in markdownToDocHtml
+  md = md.replace(/\\([#*|`_~\[\](){}+\-.!])/g, (_, ch: string) => ch);
+
+  const lines  = md.split("\n");
+  const result: string[][] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (isTableRow(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      // Map separator notation → Docs API alignment
+      const aligns = parseTableRow(lines[i + 1]).map(cell => {
+        const c = cell.trim();
+        if (c.startsWith(":") && c.endsWith(":")) return "CENTER";
+        if (c.endsWith(":"))                        return "END";
+        return "START";
+      });
+      result.push(aligns);
+      // Advance past all rows of this table
+      i += 2;
+      while (i < lines.length && isTableRow(lines[i])) i++;
+    } else {
+      i++;
+    }
+  }
+  return result;
 }
