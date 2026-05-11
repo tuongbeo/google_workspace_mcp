@@ -125,14 +125,27 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   // Inject access token into the module-level closure for this request
   _currentAccessToken = accessToken;
 
-  const server = getOrCreateServer(env);
+  let server = getOrCreateServer(env);
+
+  // Stable session ID per Google user — allows Claude.ai to maintain session continuity
+  const sessionId = `google-workspace-${sub}`;
 
   const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
+    sessionIdGenerator: () => sessionId,
     enableJsonResponse: true,
   });
 
-  await server.connect(transport);
+  try {
+    await server.connect(transport);
+  } catch (connectErr) {
+    // If the singleton server is in a broken state (e.g. previously closed),
+    // reset it and create a fresh one.
+    console.warn("[mcp-agent] server.connect() failed, recreating server:", connectErr);
+    _server = null;
+    _searchEnv = null;
+    server = getOrCreateServer(env);
+    await server.connect(transport);
+  }
 
   const patchedRequest = new Request(request, {
     headers: (() => {
@@ -146,7 +159,12 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   });
 
   const response = await transport.handleRequest(patchedRequest);
-  await server.close();
+
+  // CRITICAL: Do NOT call server.close() here!
+  // The McpServer is a singleton reused across warm isolate requests.
+  // Calling close() marks it as permanently closed, breaking all subsequent
+  // requests in the same Cloudflare Worker isolate (~10-15 min warm lifetime).
+  // The transport is garbage collected after the response is sent.
 
   // Inject stable Mcp-Session-Id based on Google user sub
   const headers = new Headers(response.headers);
