@@ -347,7 +347,7 @@ function markdownToDocHtml(
         tableLines.push(lines[j]);
         j++;
       }
-      html += buildHtmlTable(tableLines);
+      html += buildHtmlTable(tableLines, tok);
       i = j; continue;
     }
 
@@ -427,7 +427,10 @@ function parseTableRow(line: string): string[] {
  * lines[1] = separator row (used for column alignment only)
  * lines[2..] = data rows
  */
-function buildHtmlTable(lines: string[]): string {
+function buildHtmlTable(
+  lines: string[],
+  tok: ReturnType<typeof deriveDocTokens>,
+): string {
   const headers    = parseTableRow(lines[0]);
   const alignments = parseTableRow(lines[1]).map(cell => {
     const c = cell.trim();
@@ -436,17 +439,33 @@ function buildHtmlTable(lines: string[]): string {
     return "left";
   });
 
-  let html = "<table>\n<thead>\n<tr>\n";
-  headers.forEach((h, j) => {
-    html += `  <th style="text-align:${alignments[j] ?? "left"}">${inlineFormat(h)}</th>\n`;
-  });
-  html += "</tr>\n</thead>\n<tbody>\n";
+  // Use plain <tr><td> for ALL rows — including the header.
+  // Google Docs creates a spurious empty row when it sees <thead>/<th>,
+  // and overrides text-align on <th> to center regardless of inline style.
+  // Using styled <td> for the header row avoids both issues.
+  let html = "<table>\n<tbody>\n";
 
+  // Header row: bold + theme colors via inline style
+  html += "<tr>\n";
+  headers.forEach((h, j) => {
+    const align = alignments[j] ?? "left";
+    html += `  <td style="text-align:${align};font-weight:bold;` +
+            `background-color:${tok.tableHeader.bgColor};` +
+            `color:${tok.tableHeader.textColor};` +
+            `border:1px solid #ccc;padding:5px 10px">${inlineFormat(h)}</td>\n`;
+  });
+  html += "</tr>\n";
+
+  // Data rows: alternating background on even rows
   for (let r = 2; r < lines.length; r++) {
-    const cells = parseTableRow(lines[r]);
+    const cells  = parseTableRow(lines[r]);
+    const isEven = (r - 2) % 2 === 1;
     html += "<tr>\n";
     cells.forEach((c, j) => {
-      html += `  <td style="text-align:${alignments[j] ?? "left"}">${inlineFormat(c)}</td>\n`;
+      const align = alignments[j] ?? "left";
+      const bg    = isEven ? `background-color:${tok.tableAltRow.bgColor};` : "";
+      html += `  <td style="text-align:${align};${bg}` +
+              `border:1px solid #ccc;padding:5px 10px">${inlineFormat(c)}</td>\n`;
     });
     html += "</tr>\n";
   }
