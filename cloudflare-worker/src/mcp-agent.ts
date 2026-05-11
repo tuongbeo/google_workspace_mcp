@@ -35,8 +35,6 @@ import {
 } from "./tools/workspace";
 
 // ── Module-level token store (request-scoped, mutated per request) ────────────
-// Each request sets this before the MCP handler runs. Cloudflare Workers
-// processes one request at a time per isolate, so this is safe.
 let _currentAccessToken = "";
 const getCreds = async () => ({ accessToken: _currentAccessToken });
 
@@ -50,42 +48,38 @@ function getOrCreateServer(env: Env): McpServer {
   const server = new McpServer({
     name: "mcp-google-workspace",
     version: "2.1.0",
-    // Extra serverInfo fields passed through to the MCP initialize response.
-    // MCP clients (e.g. Claude.ai) may use these for display/grouping.
     category: "Productivity",
     logoUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/3840px-Google_%22G%22_logo.svg.png",
   } as any);
 
-  // ── Core tools ───────────────────────────────────────────────────────────────
-  registerGmailTools(server, getCreds);          // 11 tools
-  registerGmailExtraTools(server, getCreds);     // +3 tools (threads batch, filters)
-  registerCalendarTools(server, getCreds);       // 8 tools
-  registerDriveTools(server, getCreds);          // 15 tools
-  registerDriveExtraTools(server, getCreds);     // +2 tools (download URL, public access)
-  registerDocsTools(server, getCreds);           // 13 tools
-  registerDocsExtraTools(server, getCreds);      // +8 tools (search, tabs, table, headers)
-  registerSheetsTools(server, getCreds);         // 9 tools (includes create_formatted_spreadsheet)
-  registerSheetsExtraTools(server, getCreds);    // +1 tool (conditional formatting)
-  registerSlidesTools(server, getCreds);         // 6 tools (includes create_presentation_from_outline)
-  registerSlidesExtendedTools(server, getCreds); // +18 Slides tools
-  registerChatTools(server, getCreds);           // 4 tools
-  registerTasksTools(server, getCreds);          // 9 tools
-  registerFormsTools(server, getCreds);          // 5 tools
-  registerContactsTools(server, getCreds);       // 11 tools
-  registerContactsExtraTools(server, getCreds);  // +1 tool (batch)
-  registerAppsScriptTools(server, getCreds);     // 11 tools
-  registerAppsScriptExtraTools(server, getCreds);// +5 tools (versions, delete, metrics)
-  registerSearchTools(server, getCreds, env);    // 3 tools
-  registerWorkspaceExtraTools(server, getCreds); // +6 tools
-  registerDocsAdvancedTools(server, getCreds);   // +11 tools (Phase 5: named ranges, footnotes, images, styling, suggestions)
-  registerDriveRevisionsTools(server, getCreds); // +6 tools (Phase 6: Drive version control)
-  registerCompositeTools(server, getCreds);      // +2 tools (Phase 2A: create_rich_doc, import_markdown_as_doc)
-  registerSheetsPhase2Tools(server, getCreds);   // +9 tools (Phase 2B: charts, validation, sort, merge, pivot, props, filter, protected, batch)
-  registerDocsPhase2Tools(server, getCreds);     // +3 tools (Phase 2C: manage_table_cells, section_break, delete_bullets)
-  registerSlidesPhase2Tools(server, getCreds);   // +4 tools (Phase 2D: create_shape, create_line, group_objects, update_shape_properties)
-  registerAppsScriptPhase2Tools(server, getCreds); // +1 tool (Phase 2E: manage_triggers)
-  registerConsolidatedTools(server, getCreds);   // +8 tools (Phase 3: manage_doc_tabs/named_ranges/comments/suggestions/drive_revisions/script_deployments/script_versions/contact_groups)
-  // ──────────────────────────────────────────── Total: ~193 tools ──
+  registerGmailTools(server, getCreds);
+  registerGmailExtraTools(server, getCreds);
+  registerCalendarTools(server, getCreds);
+  registerDriveTools(server, getCreds);
+  registerDriveExtraTools(server, getCreds);
+  registerDocsTools(server, getCreds);
+  registerDocsExtraTools(server, getCreds);
+  registerSheetsTools(server, getCreds);
+  registerSheetsExtraTools(server, getCreds);
+  registerSlidesTools(server, getCreds);
+  registerSlidesExtendedTools(server, getCreds);
+  registerChatTools(server, getCreds);
+  registerTasksTools(server, getCreds);
+  registerFormsTools(server, getCreds);
+  registerContactsTools(server, getCreds);
+  registerContactsExtraTools(server, getCreds);
+  registerAppsScriptTools(server, getCreds);
+  registerAppsScriptExtraTools(server, getCreds);
+  registerSearchTools(server, getCreds, env);
+  registerWorkspaceExtraTools(server, getCreds);
+  registerDocsAdvancedTools(server, getCreds);
+  registerDriveRevisionsTools(server, getCreds);
+  registerCompositeTools(server, getCreds);
+  registerSheetsPhase2Tools(server, getCreds);
+  registerDocsPhase2Tools(server, getCreds);
+  registerSlidesPhase2Tools(server, getCreds);
+  registerAppsScriptPhase2Tools(server, getCreds);
+  registerConsolidatedTools(server, getCreds);
 
   _server = server;
   _searchEnv = env;
@@ -107,30 +101,35 @@ function unauthorizedResponse(publicBaseUrl: string): Response {
 
 export async function handleMcpRequest(request: Request, env: Env): Promise<Response> {
   const sub = await extractSub(request, env.JWT_SECRET);
-  if (!sub) return unauthorizedResponse(env.PUBLIC_BASE_URL);
+  if (!sub) {
+    console.warn("[mcp] No valid sub in JWT — returning 401");
+    return unauthorizedResponse(env.PUBLIC_BASE_URL);
+  }
+
+  // Diagnostic: log the JSON-RPC method being called
+  try {
+    const cloned = request.clone();
+    const body = await cloned.json() as { method?: string } | Array<{ method?: string }>;
+    const method = Array.isArray(body) ? body.map(m => m.method).join(",") : body.method;
+    console.log(`[mcp] ${request.method} jsonrpc=${method} sub=${sub}`);
+  } catch {
+    console.log(`[mcp] ${request.method} (non-JSON body) sub=${sub}`);
+  }
 
   let accessToken: string;
   try {
     accessToken = await getValidAccessToken(
-      sub,
-      env.TOKENS_KV,                 // Google tokens lưu trong TOKENS_KV (tách khỏi OAUTH_KV)
-      env.GOOGLE_OAUTH_CLIENT_ID,    // fallback cho tokens cũ (trước khi multi-tenant upgrade)
-      env.GOOGLE_OAUTH_CLIENT_SECRET,
+      sub, env.TOKENS_KV, env.GOOGLE_OAUTH_CLIENT_ID, env.GOOGLE_OAUTH_CLIENT_SECRET,
     );
   } catch (err) {
-    console.error("[mcp-agent] getValidAccessToken failed:", err);
+    console.error("[mcp] getValidAccessToken failed:", err);
     return unauthorizedResponse(env.PUBLIC_BASE_URL);
   }
 
-  // Inject access token into the module-level closure for this request
   _currentAccessToken = accessToken;
-
   let server = getOrCreateServer(env);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
-    // Stateless mode: each request is independent. Do NOT use sessionIdGenerator here —
-    // stateful mode would require each new per-request transport to know prior session state,
-    // which isn't possible in a stateless Workers architecture.
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
@@ -138,9 +137,7 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   try {
     await server.connect(transport);
   } catch (connectErr) {
-    // Singleton may be stuck in connected state (e.g. previous transport was not closed).
-    // Reset and recreate.
-    console.warn("[mcp-agent] server.connect() failed, recreating server:", connectErr);
+    console.warn("[mcp] server.connect() failed, recreating:", connectErr);
     _server = null;
     _searchEnv = null;
     server = getOrCreateServer(env);
@@ -159,17 +156,10 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   });
 
   const response = await transport.handleRequest(patchedRequest);
-
-  // Close the transport (NOT server.close) so Protocol._transport is cleared
-  // and the next request can connect a fresh transport to the singleton server.
-  // This is equivalent to the original server.close() but doesn't risk
-  // triggering any "closed" flag on the McpServer itself.
   await transport.close();
 
-  // Inject stable Mcp-Session-Id based on Google user sub
   const headers = new Headers(response.headers);
   headers.set("Mcp-Session-Id", `google-workspace-${sub}`);
-  // Expose the header so browsers/clients can read it
   const existing = headers.get("Access-Control-Expose-Headers") || "";
   if (!existing.includes("Mcp-Session-Id")) {
     headers.set("Access-Control-Expose-Headers",

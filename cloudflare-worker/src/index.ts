@@ -111,11 +111,13 @@ app.delete("/mcp", (c) => new Response(null, {
 
 app.all("/mcp", async (c) => {
   const env = c.env;
+  const method = c.req.method;
   const auth = c.req.header("Authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "").trim();
 
   // Không có token → 401 kèm WWW-Authenticate để Claude.ai trigger OAuth discovery
   if (!token) {
+    console.log(`[route] ${method} /mcp — no token → 401`);
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
       headers: {
@@ -131,8 +133,7 @@ app.all("/mcp", async (c) => {
   // Validate proxy JWT
   const payload = await verifyJWT(token, env.JWT_SECRET);
   if (!payload) {
-    // BUG-001 FIX: Include WWW-Authenticate on ALL 401 responses (RFC 6750)
-    // Without this header, Claude.ai does not trigger the re-authentication flow
+    console.warn(`[route] ${method} /mcp — invalid/expired JWT → 401`);
     return new Response(
       JSON.stringify({
         error: "invalid_token",

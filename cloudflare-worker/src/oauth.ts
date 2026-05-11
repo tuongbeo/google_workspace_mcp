@@ -12,7 +12,7 @@
  */
 
 import { Env, OAuthStateRecord, DCRClientRecord } from "./types";
-import { signJWT, storeTokens } from "./jwt";
+import { signJWT, verifyJWT, storeTokens } from "./jwt";
 
 const GOOGLE_SCOPES = [
   "openid", "email", "profile",
@@ -47,7 +47,7 @@ export function buildOAuthMetadata(baseUrl: string) {
     registration_endpoint:   `${baseUrl}/register`,
     scopes_supported:             ["openid", "email", "profile"],
     response_types_supported:     ["code"],
-    grant_types_supported:        ["authorization_code"],
+    grant_types_supported:        ["authorization_code", "refresh_token"],
     token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic", "none"],
     code_challenge_methods_supported:      ["S256", "plain"],
   };
@@ -282,7 +282,7 @@ npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
   }
 }
 
-// ── POST /token — Return the pending JWT created at /callback ─────────────────
+// ── POST /token — Exchange code OR refresh token ──────────────────────────────
 
 export async function handleToken(request: Request, env: Env): Promise<Response> {
   let body: Record<string, string> = {};
@@ -294,9 +294,48 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     fd.forEach((v, k) => { body[k] = v.toString(); });
   }
 
-  const { grant_type, code } = body;
+  const { grant_type, code, refresh_token } = body;
+  console.log(`[token] grant_type=${grant_type}`);
 
+  // ── Handle refresh_token grant ────────────────────────────────────────────
+  if (grant_type === "refresh_token") {
+    if (!refresh_token) {
+      console.error("[token] refresh_token missing in request");
+      return Response.json({ error: "invalid_request", error_description: "Missing refresh_token" }, { status: 400 });
+    }
+
+    // Verify the refresh token (it's a proxy JWT)
+    const payload = await verifyJWT(refresh_token, env.JWT_SECRET);
+    if (!payload || !payload.sub) {
+      console.error("[token] refresh_token invalid or expired");
+      return Response.json({ error: "invalid_grant", error_description: "Refresh token expired. Please reconnect." }, { status: 400 });
+    }
+
+    const sub = payload.sub as string;
+
+    // Verify Google tokens still exist in KV
+    const tokenRecord = await env.TOKENS_KV.get(`token:${sub}`);
+    if (!tokenRecord) {
+      console.error(`[token] No Google tokens found for sub=${sub} during refresh`);
+      return Response.json({ error: "invalid_grant", error_description: "Session expired. Please reconnect." }, { status: 400 });
+    }
+
+    // Issue fresh proxy JWT + refresh token
+    const newAccessJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
+    const newRefreshJWT = await signJWT({ sub, type: "refresh" }, env.JWT_SECRET, 90 * 24 * 3600);
+
+    console.log(`[token] REFRESH SUCCESS for sub=${sub}`);
+    return Response.json({
+      access_token:  newAccessJWT,
+      token_type:    "bearer",
+      expires_in:    2592000,
+      refresh_token: newRefreshJWT,
+    });
+  }
+
+  // ── Handle authorization_code grant ───────────────────────────────────────
   if (grant_type !== "authorization_code") {
+    console.error(`[token] unsupported grant_type=${grant_type}`);
     return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
   }
   if (!code) {
@@ -311,10 +350,16 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
   }
   await env.OAUTH_KV.delete(`pending_jwt:${code}`);
 
-  console.log(`[token] SUCCESS — issued JWT`);
+  // Issue refresh token with same sub
+  const payload = await verifyJWT(proxyJWT, env.JWT_SECRET);
+  const sub = (payload?.sub as string) || "";
+  const refreshJWT = await signJWT({ sub, type: "refresh" }, env.JWT_SECRET, 90 * 24 * 3600);
+
+  console.log(`[token] AUTH_CODE SUCCESS — issued JWT + refresh_token for sub=${sub}`);
   return Response.json({
-    access_token: proxyJWT,
-    token_type:   "bearer",
-    expires_in:   2592000,
+    access_token:  proxyJWT,
+    token_type:    "bearer",
+    expires_in:    2592000,
+    refresh_token: refreshJWT,
   });
 }
