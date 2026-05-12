@@ -62,6 +62,8 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
         .describe("Text displayed in the page header on every page"),
       footer_text: z.string().optional()
         .describe("Text displayed in the page footer on every page"),
+      alignment: z.enum(["left", "justify"]).optional().default("left")
+        .describe("Body text alignment. 'justify' for full-width justified text (good for formal documents)"),
     },
     { readOnlyHint: false },
     withErrorHandler(async ({
@@ -76,6 +78,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
       position = "append",
       header_text,
       footer_text,
+      alignment = "left",
     }) => {
       const { accessToken } = await getCreds();
 
@@ -171,6 +174,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
         fontPair: font_pair,
         startIndex: 1,
         tabId: activeTabId,
+        alignment,
       });
 
       // ── Execute Pass 1: Text + structure ──────────────────────────────────

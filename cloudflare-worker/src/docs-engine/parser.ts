@@ -129,41 +129,47 @@ function expandInlineText(raw: string): InlineNode[] {
 // ── Block parser ─────────────────────────────────────────────────────────────
 
 export function parseMarkdown(input: string): DocNode[] {
-  // Pre-process: \pagebreak → sentinel, \toc → sentinel
+  // Pre-process custom syntax BEFORE feeding to markdown-it
+  // Use unique sentinel strings that won't appear in normal text
+  // and will survive as standalone paragraph tokens
   const processed = input
-    .replace(/\\pagebreak/g, "\n\n<!--PAGEBREAK-->\n\n")
-    .replace(/\\toc/g, "\n\n<!--TOC-->\n\n");
+    .replace(/\\pagebreak/g, "\n\n\u0002PAGEBREAK\u0003\n\n")
+    .replace(/\\toc/g, "\n\n\u0002TOC\u0003\n\n");
 
   const tokens = md.parse(processed, {});
   const nodes: DocNode[] = [];
   let i = 0;
 
-  // Collect footnote defs at bottom (standard [^id]: text syntax)
+  // Collect footnote defs — strip them from the processed content
+  // [^id]: text at start of line (may be parsed as paragraphs — we intercept below)
   const footnoteDefs: Map<string, string> = new Map();
   const FNDEF_RE = /^\[\^([^\]]+)\]:\s*(.+)$/gm;
   let fn: RegExpExecArray | null;
   while ((fn = FNDEF_RE.exec(input)) !== null) {
     footnoteDefs.set(fn[1], fn[2].trim());
   }
+  // Build set of footnote def strings to filter them out of paragraph nodes
+  const footnoteDefLines = new Set<string>();
+  for (const [id, content] of footnoteDefs) {
+    footnoteDefLines.add(`[^${id}]: ${content}`);
+  }
 
   while (i < tokens.length) {
     const t = tokens[i];
 
-    // HTML comments used as sentinels
+    // HTML comments used as sentinels (fallback if html: true)
     if (t.type === "html_block") {
-      if (t.content.includes("<!--PAGEBREAK-->")) {
-        nodes.push({ type: "page_break" });
-      } else if (t.content.includes("<!--TOC-->")) {
-        nodes.push({ type: "toc" });
-      }
+      if (t.content.includes("PAGEBREAK")) nodes.push({ type: "page_break" });
+      else if (t.content.includes("TOC")) nodes.push({ type: "toc" });
       i++;
       continue;
     }
 
-    if (t.type === "inline" && (t.content === "<!--PAGEBREAK-->" || t.content === "<!--TOC-->")) {
-      nodes.push({ type: t.content.includes("PAGEBREAK") ? "page_break" : "toc" });
-      i++;
-      continue;
+    // Sentinel detection in inline tokens (the main path with html: false)
+    if (t.type === "inline") {
+      const c = t.content.trim();
+      if (c === "\u0002PAGEBREAK\u0003") { nodes.push({ type: "page_break" }); i++; continue; }
+      if (c === "\u0002TOC\u0003") { nodes.push({ type: "toc" }); i++; continue; }
     }
 
     // Headings
@@ -181,7 +187,15 @@ export function parseMarkdown(input: string): DocNode[] {
       const inlineToken = tokens[i + 1];
       if (inlineToken) {
         const raw = inlineToken.content;
-        // Check for standalone image (only element in paragraph)
+
+        // Skip footnote definition paragraphs — they are metadata, not body content
+        // [^id]: text gets parsed as a paragraph by markdown-it
+        if (/^\[\^[^\]]+\]:\s*.+/.test(raw.trim())) {
+          i += 3;
+          continue;
+        }
+
+        // Check for standalone image
         const imgOnlyMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(raw.trim());
         if (imgOnlyMatch) {
           let alt = imgOnlyMatch[1];

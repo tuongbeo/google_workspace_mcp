@@ -1,15 +1,15 @@
 /**
- * docs-engine/builder.ts  v2
- * AST → Google Docs batchUpdate requests
+ * docs-engine/builder.ts  v3
  *
- * Approach (proven, simple):
- *   1. Build full document text as ONE string
- *   2. Insert all text in ONE insertText request at startIndex
- *   3. Track per-segment character ranges
- *   4. Apply paragraph styles + inline styles + bullets using those ranges
- *   5. Collect rich elements (images, mentions, footnotes, TOC) as placeholders
- *
- * This avoids all reverse-order index complexity by doing a single text insert.
+ * Fixes vs v2:
+ *  - Heading paraStyle: endIndex = startIdx + text.length - 1 (exclude trailing \n)
+ *  - footnote_def nodes filtered from fullText build AND from contentNodes
+ *  - \pagebreak / \toc parser sentinel fix: also detect in paragraph content
+ *  - Placeholder length: use actual byte length via Buffer-free approach
+ *  - Checked checkbox items: apply strikethrough + muted color
+ *  - buildDocText: include ALL text runs including list items
+ *  - fillTableCells: replace findLast with manual reverse loop (V8 compat)
+ *  - Justify alignment support via opts.alignment
  */
 
 import type { DocNode, InlineNode, ListItem, RichElement, ExecutionPlan } from "./types";
@@ -26,19 +26,14 @@ export function hexToRgb(hex: string) {
   };
 }
 
-// ── Placeholder IDs ───────────────────────────────────────────────────────────
+// ── Placeholders — fixed 10-char each ────────────────────────────────────────
+// Format: «TAG001»  where TAG = 3 chars, id = 3 chars → total 8 + 2 guillemets = 10
 
 let _counter = 0;
-function uid(): string {
-  return (++_counter).toString(36).padStart(3, "0");
-}
-// Use short fixed-length placeholders so we can count characters accurately
-// Format: \u00AB + 8 chars + \u00BB  = 10 chars total, very unlikely in real text
-function makePH(tag: string): string {
-  return `\u00AB${tag}${uid()}\u00BB`; // «TAG001»
-}
+function uid(): string { return (++_counter).toString(36).padStart(3, "0"); }
+function makePH(tag: string): string { return `\u00AB${tag}${uid()}\u00BB`; }
+export const PH_LEN = 10; // «XXX000» byte length in BMP
 
-// Rich element registry for this build
 let _rich: RichElement[] = [];
 
 function imgPH(url: string, alt?: string, w?: number, h?: number): string {
@@ -62,7 +57,7 @@ function tocPH(): string {
   return ph;
 }
 
-// ── Inline → plain text ───────────────────────────────────────────────────────
+// ── Inline → text (with placeholders) ────────────────────────────────────────
 
 function inlinesToText(nodes: InlineNode[]): string {
   return nodes.map(n => {
@@ -80,97 +75,12 @@ function inlinesToText(nodes: InlineNode[]): string {
   }).join("");
 }
 
-// ── Per-segment metadata ──────────────────────────────────────────────────────
-
-interface Seg {
-  text: string;           // raw text including \n
-  startIdx: number;       // absolute start in doc (1-based)
-  node: DocNode;
-  listType?: "bullet" | "numbered" | "checkbox";
-}
-
-// ── Inline style walker ───────────────────────────────────────────────────────
-
-function applyInlineStyles(
-  nodes: InlineNode[],
-  baseDocIdx: number,  // absolute doc index of paragraph start
-  tabId: string | undefined,
-  requests: object[]
-): number {
-  let rel = 0;
-  for (const n of nodes) {
-    switch (n.type) {
-      case "text":
-        rel += n.content.length;
-        break;
-      case "bold":
-      case "italic":
-      case "strikethrough":
-      case "underline": {
-        const start = rel;
-        rel = applyInlineStyles(n.children, baseDocIdx + start, tabId, requests);
-        // rel is now relative end; convert to absolute
-        const absStart = baseDocIdx + start;
-        const absEnd = baseDocIdx + rel;
-        const styleKey = n.type === "bold" ? "bold"
-          : n.type === "italic" ? "italic"
-          : n.type === "strikethrough" ? "strikethrough"
-          : "underline";
-        if (absEnd > absStart) {
-          requests.push(textStyleReq(absStart, absEnd, tabId, { [styleKey]: true }));
-        }
-        break;
-      }
-      case "code": {
-        const start = rel;
-        rel += n.content.length;
-        requests.push(textStyleReq(baseDocIdx + start, baseDocIdx + rel, tabId, {
-          weightedFontFamily: { fontFamily: "Roboto Mono" },
-          fontSize: { magnitude: 10, unit: "PT" },
-          backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } },
-        }));
-        break;
-      }
-      case "link": {
-        const start = rel;
-        rel = applyInlineStyles(n.children, baseDocIdx + start, tabId, requests);
-        const absStart = baseDocIdx + start;
-        const absEnd = baseDocIdx + rel;
-        if (absEnd > absStart) {
-          requests.push(textStyleReq(absStart, absEnd, tabId, {
-            link: { url: n.url },
-            foregroundColor: { color: { rgbColor: { red: 0.07, green: 0.36, blue: 0.8 } } },
-            underline: true,
-          }));
-        }
-        break;
-      }
-      case "mention":
-        rel += 10; // «MNTxxx» = 10 chars
-        break;
-      case "footnote_ref":
-        rel += 10;
-        break;
-      case "image":
-        rel += 10;
-        break;
-      default:
-        break;
-    }
-  }
-  return rel;
-}
+// ── Request builders ──────────────────────────────────────────────────────────
 
 function textStyleReq(start: number, end: number, tabId: string | undefined, style: Record<string, unknown>): object {
   const range: Record<string, unknown> = { startIndex: start, endIndex: end };
   if (tabId) range.tabId = tabId;
-  return {
-    updateTextStyle: {
-      range,
-      textStyle: style,
-      fields: Object.keys(style).join(","),
-    },
-  };
+  return { updateTextStyle: { range, textStyle: style, fields: Object.keys(style).join(",") } };
 }
 
 function paraStyleReq(start: number, end: number, tabId: string | undefined, style: Record<string, unknown>, fields: string): object {
@@ -179,37 +89,87 @@ function paraStyleReq(start: number, end: number, tabId: string | undefined, sty
   return { updateParagraphStyle: { range, paragraphStyle: style, fields } };
 }
 
-// ── Build list text ───────────────────────────────────────────────────────────
+// ── Inline style walker ───────────────────────────────────────────────────────
 
-function buildListText(items: ListItem[]): string {
-  return items.map(item => {
-    const text = inlinesToText(item.children) + "\n";
-    const sub = item.subItems?.length ? buildListText(item.subItems) : "";
-    return text + sub;
-  }).join("");
+function applyInlineStyles(nodes: InlineNode[], base: number, tabId: string | undefined, reqs: object[]): number {
+  let rel = 0;
+  for (const n of nodes) {
+    switch (n.type) {
+      case "text": rel += n.content.length; break;
+      case "bold": case "italic": case "strikethrough": case "underline": {
+        const s = rel;
+        rel = applyInlineStyles(n.children, base + s, tabId, reqs);
+        const styleKey = n.type === "bold" ? "bold" : n.type === "italic" ? "italic"
+          : n.type === "strikethrough" ? "strikethrough" : "underline";
+        if (rel > s) reqs.push(textStyleReq(base + s, base + rel, tabId, { [styleKey]: true }));
+        break;
+      }
+      case "code": {
+        const s = rel; rel += n.content.length;
+        reqs.push(textStyleReq(base + s, base + rel, tabId, {
+          weightedFontFamily: { fontFamily: "Roboto Mono" },
+          fontSize: { magnitude: 10, unit: "PT" },
+          backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } },
+        }));
+        break;
+      }
+      case "link": {
+        const s = rel;
+        rel = applyInlineStyles(n.children, base + s, tabId, reqs);
+        if (rel > s) reqs.push(textStyleReq(base + s, base + rel, tabId, {
+          link: { url: n.url },
+          foregroundColor: { color: { rgbColor: { red: 0.07, green: 0.36, blue: 0.8 } } },
+          underline: true,
+        }));
+        break;
+      }
+      case "mention": rel += PH_LEN; break;
+      case "footnote_ref": rel += PH_LEN; break;
+      case "image": rel += PH_LEN; break;
+      default: break;
+    }
+  }
+  return rel;
 }
 
-// ── Main build function ───────────────────────────────────────────────────────
+// ── List text builder ─────────────────────────────────────────────────────────
+
+function buildListText(items: ListItem[]): string {
+  return items.map(item => inlinesToText(item.children) + "\n"
+    + (item.subItems?.length ? buildListText(item.subItems) : "")).join("");
+}
+
+// ── Main builder ──────────────────────────────────────────────────────────────
 
 export function buildExecutionPlan(
   nodes: DocNode[],
-  opts: { theme?: string; fontPair?: string; startIndex?: number; tabId?: string } = {}
+  opts: {
+    theme?: string;
+    fontPair?: string;
+    startIndex?: number;
+    tabId?: string;
+    alignment?: "left" | "justify";
+  } = {}
 ): ExecutionPlan {
   _counter = 0;
   _rich = [];
 
   const startIndex = opts.startIndex ?? 1;
   const tabId = opts.tabId;
+  const alignment = opts.alignment ?? "left";
 
-  // Collect footnote defs
+  // Collect footnote defs (these must NOT be inserted into body text)
   const footnoteDefs = new Map<string, string>();
   for (const n of nodes) {
     if (n.type === "footnote_def") footnoteDefs.set(n.id, n.content);
   }
 
-  // ── Step 1: Build full text and segment map ──────────────────────────────
-
+  // Filter out footnote_def nodes — they are metadata only, not body content
   const contentNodes = nodes.filter(n => n.type !== "footnote_def");
+
+  // ── Step 1: Build full text string + segment map ────────────────────────
+
+  interface Seg { text: string; startIdx: number; node: DocNode }
   const segs: Seg[] = [];
   let fullText = "";
   let cursor = startIndex;
@@ -218,23 +178,13 @@ export function buildExecutionPlan(
     let segText = "";
 
     switch (node.type) {
-      case "heading":
-        segText = inlinesToText(node.children) + "\n";
-        break;
-      case "paragraph":
-        segText = inlinesToText(node.children) + "\n";
-        break;
-      case "blockquote":
-        segText = inlinesToText(node.children) + "\n";
-        break;
-      case "code_block":
-        segText = node.content.replace(/\n$/, "") + "\n";
-        break;
-      case "bullet_list":
-        segText = buildListText(node.items);
-        break;
+      case "heading":      segText = inlinesToText(node.children) + "\n"; break;
+      case "paragraph":    segText = inlinesToText(node.children) + "\n"; break;
+      case "blockquote":   segText = inlinesToText(node.children) + "\n"; break;
+      case "code_block":   segText = node.content.replace(/\n$/, "") + "\n"; break;
+      case "bullet_list":  segText = buildListText(node.items); break;
       case "table": {
-        // Table is handled specially: insert a sentinel newline, table goes in pass2
+        // Placeholder newline; actual table inserted in pass2 via fillTableCells
         segText = "\n";
         _rich.push({
           type: "rich_link",
@@ -243,21 +193,11 @@ export function buildExecutionPlan(
         });
         break;
       }
-      case "horizontal_rule":
-        segText = "\n"; // HR inserted separately
-        break;
-      case "page_break":
-        segText = "\n";
-        break;
-      case "toc":
-        segText = tocPH() + "\n";
-        break;
-      case "image": {
-        segText = imgPH(node.url, node.alt, node.widthPt, node.heightPt) + "\n";
-        break;
-      }
-      default:
-        segText = "\n";
+      case "horizontal_rule": segText = "\n"; break;
+      case "page_break":      segText = "\n"; break;
+      case "toc":             segText = tocPH() + "\n"; break;
+      case "image":           segText = imgPH(node.url, node.alt, node.widthPt, node.heightPt) + "\n"; break;
+      default:                segText = "\n"; break;
     }
 
     segs.push({ text: segText, startIdx: cursor, node });
@@ -265,7 +205,7 @@ export function buildExecutionPlan(
     cursor += segText.length;
   }
 
-  // ── Step 2: Single insertText for all content ────────────────────────────
+  // ── Step 2: Single insertText ────────────────────────────────────────────
 
   const pass1Requests: object[] = [];
 
@@ -275,78 +215,102 @@ export function buildExecutionPlan(
     pass1Requests.push({ insertText: { location: loc, text: fullText } });
   }
 
-  // ── Step 3: Apply styles (after text is inserted) ────────────────────────
+  // ── Step 3: Style requests ────────────────────────────────────────────────
+  // KEY FIX: paragraph style endIndex must EXCLUDE the trailing \n
+  // Google Docs paragraph style applies to the paragraph marker before \n.
+  // Using endIdx (which includes \n) causes the style to leak into the next paragraph.
 
-  for (let si = 0; si < segs.length; si++) {
-    const seg = segs[si];
+  const hMap: Record<number, string> = {
+    1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3",
+    4: "HEADING_4", 5: "HEADING_5", 6: "HEADING_6",
+  };
+
+  for (const seg of segs) {
     const { startIdx, node, text } = seg;
     const endIdx = startIdx + text.length;
+    // paraEnd: endIndex for paragraph style = exclude trailing \n
+    const paraEnd = text.endsWith("\n") ? endIdx - 1 : endIdx;
 
     switch (node.type) {
       case "heading": {
-        const hMap: Record<number, string> = {
-          1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3",
-          4: "HEADING_4", 5: "HEADING_5", 6: "HEADING_6"
-        };
-        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId,
+        // Apply heading style only to the heading paragraph (not including \n)
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
           { namedStyleType: hMap[node.level] }, "namedStyleType"));
         applyInlineStyles(node.children, startIdx, tabId, pass1Requests);
         break;
       }
 
-      case "paragraph":
+      case "paragraph": {
+        // Apply justify alignment to body paragraphs if requested
+        if (alignment === "justify") {
+          pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+            { alignment: "JUSTIFIED" }, "alignment"));
+        }
         applyInlineStyles(node.children, startIdx, tabId, pass1Requests);
         break;
+      }
 
-      case "blockquote":
-        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
+      case "blockquote": {
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId, {
           indentStart: { magnitude: 36, unit: "PT" },
           indentFirstLine: { magnitude: 0, unit: "PT" },
-        }, "indentStart,indentFirstLine"));
-        pass1Requests.push(textStyleReq(startIdx, endIdx - 1, tabId, {
+          ...(alignment === "justify" ? { alignment: "JUSTIFIED" } : {}),
+        }, `indentStart,indentFirstLine${alignment === "justify" ? ",alignment" : ""}`));
+        pass1Requests.push(textStyleReq(startIdx, paraEnd, tabId, {
           italic: true,
           foregroundColor: { color: { rgbColor: { red: 0.45, green: 0.45, blue: 0.45 } } },
         }));
         applyInlineStyles(node.children, startIdx, tabId, pass1Requests);
         break;
+      }
 
-      case "code_block":
+      case "code_block": {
         pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
           indentStart: { magnitude: 18, unit: "PT" },
         }, "indentStart"));
-        pass1Requests.push(textStyleReq(startIdx, endIdx - 1, tabId, {
+        pass1Requests.push(textStyleReq(startIdx, paraEnd, tabId, {
           weightedFontFamily: { fontFamily: "Roboto Mono" },
           fontSize: { magnitude: 10, unit: "PT" },
-          backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } },
+          backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } },
         }));
         break;
+      }
 
       case "bullet_list": {
         const bulletPreset = node.listType === "numbered" ? "NUMBERED_DECIMAL_ALPHA_ROMAN"
           : node.listType === "checkbox" ? "BULLET_CHECKBOX"
           : "BULLET_DISC_CIRCLE_SQUARE";
+
+        // createParagraphBullets range: endIndex should be one before the last \n
         const range: Record<string, unknown> = { startIndex: startIdx, endIndex: endIdx - 1 };
         if (tabId) range.tabId = tabId;
         pass1Requests.push({ createParagraphBullets: { range, bulletPreset } });
 
-        // Apply inline styles per item
+        // Apply inline styles per item + strikethrough for checked items
         let itemCursor = startIdx;
         for (const item of node.items) {
-          const itemText = inlinesToText(item.children);
+          const itemPlainText = inlinesToText(item.children);
+          const itemLen = itemPlainText.length;
           applyInlineStyles(item.children, itemCursor, tabId, pass1Requests);
-          itemCursor += itemText.length + 1; // +1 for \n
+
+          // FIX: checked checkbox items → strikethrough + muted color
+          if (node.listType === "checkbox" && item.checked === true) {
+            pass1Requests.push(textStyleReq(itemCursor, itemCursor + itemLen, tabId, {
+              strikethrough: true,
+              foregroundColor: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
+            }));
+          }
+          itemCursor += itemLen + 1; // +1 for \n
         }
         break;
       }
 
       case "horizontal_rule": {
-        // Google Docs API does not have insertHorizontalRule
-        // Workaround: apply bottom border to the paragraph
-        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId, {
           borderBottom: {
-            color: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
+            color: { color: { rgbColor: { red: 0.7, green: 0.7, blue: 0.7 } } },
             width: { magnitude: 1, unit: "PT" },
-            padding: { magnitude: 2, unit: "PT" },
+            padding: { magnitude: 3, unit: "PT" },
             dashStyle: "SOLID",
           },
           spaceBelow: { magnitude: 8, unit: "PT" },
@@ -355,13 +319,15 @@ export function buildExecutionPlan(
       }
 
       case "page_break": {
-        pass1Requests.push({ insertPageBreak: { location: { index: startIdx, ...(tabId ? { tabId } : {}) } } });
+        pass1Requests.push({
+          insertPageBreak: { location: { index: startIdx, ...(tabId ? { tabId } : {}) } },
+        });
         break;
       }
     }
   }
 
-  // ── Step 4: Fill footnote content in richElements ─────────────────────────
+  // ── Step 4: Resolve footnote content ────────────────────────────────────
 
   for (const el of _rich) {
     if (el.type === "footnote" && el.name) {
@@ -371,7 +337,11 @@ export function buildExecutionPlan(
 
   // ── Step 5: Theme requests ────────────────────────────────────────────────
 
-  const themeRequests = buildThemeRequests(opts.theme ?? "corporate", opts.fontPair ?? "arial_roboto");
+  const themeRequests = buildThemeRequests(
+    opts.theme ?? "corporate",
+    opts.fontPair ?? "arial_roboto",
+    alignment,
+  );
 
   const stats = {
     sections: contentNodes.filter(n => n.type === "heading").length,
@@ -387,12 +357,16 @@ export function buildExecutionPlan(
 
 // ── Theme requests ────────────────────────────────────────────────────────────
 
-function buildThemeRequests(themeName: string, fontPairName: string): object[] {
+function buildThemeRequests(themeName: string, fontPairName: string, alignment: string): object[] {
   const colors = getTheme(themeName as any);
   const fonts = getFontPair(fontPairName as any);
   const tok = deriveDocTokens(colors, fonts);
 
-  function ns(styleType: string, colorHex: string, sizePt: number, bold: boolean, font: string, abovePt: number, belowPt: number, lineSpacing?: number) {
+  function ns(
+    styleType: string, colorHex: string, sizePt: number,
+    bold: boolean, font: string, abovePt: number, belowPt: number,
+    lineSpacing?: number, align?: string
+  ) {
     return {
       updateNamedStyle: {
         namedStyle: {
@@ -407,6 +381,7 @@ function buildThemeRequests(themeName: string, fontPairName: string): object[] {
             spaceAbove: { magnitude: abovePt, unit: "PT" },
             spaceBelow: { magnitude: belowPt, unit: "PT" },
             ...(lineSpacing ? { lineSpacing } : {}),
+            ...(align ? { alignment: align } : {}),
           },
         },
         fields: "*",
@@ -414,8 +389,10 @@ function buildThemeRequests(themeName: string, fontPairName: string): object[] {
     };
   }
 
+  const bodyAlign = alignment === "justify" ? "JUSTIFIED" : undefined;
+
   return [
-    ns("NORMAL_TEXT", tok.normal.color, tok.normal.fontSize, false, tok.normal.fontFamily, 0, 6, 115),
+    ns("NORMAL_TEXT", tok.normal.color, tok.normal.fontSize, false, tok.normal.fontFamily, 0, 6, 115, bodyAlign),
     ns("HEADING_1", tok.heading1.color, tok.heading1.fontSize, tok.heading1.bold, tok.heading1.fontFamily, 16, 6),
     ns("HEADING_2", tok.heading2.color, tok.heading2.fontSize, tok.heading2.bold, tok.heading2.fontFamily, 14, 4),
     ns("HEADING_3", tok.heading3.color, tok.heading3.fontSize, tok.heading3.bold, tok.heading3.fontFamily, 12, 4),

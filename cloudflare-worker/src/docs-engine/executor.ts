@@ -251,18 +251,28 @@ function findTab(tabList: any[], tabId: string): any | null {
   return null;
 }
 
-/** Flatten body content to a single string + starting offset for placeholder search */
+/** Flatten ALL body content (including list items, table cells) to string + offset */
 function buildDocText(bodyContent: any[]): { text: string; offset: number } {
   let text = "";
-  let offset = 1; // Google Docs index starts at 1
-  for (const elem of bodyContent ?? []) {
-    if (elem.paragraph) {
-      for (const pe of elem.paragraph.elements ?? []) {
-        if (pe.textRun?.content) text += pe.textRun.content;
+
+  function walkContent(content: any[]) {
+    for (const elem of content ?? []) {
+      if (elem.paragraph) {
+        for (const pe of elem.paragraph.elements ?? []) {
+          if (pe.textRun?.content) text += pe.textRun.content;
+        }
+      } else if (elem.table) {
+        for (const row of elem.table.tableRows ?? []) {
+          for (const cell of row.tableCells ?? []) {
+            walkContent(cell.content ?? []);
+          }
+        }
       }
     }
   }
-  return { text, offset };
+
+  walkContent(bodyContent);
+  return { text, offset: 1 }; // Google Docs index starts at 1
 }
 
 async function fillTableCells(
@@ -281,9 +291,15 @@ async function fillTableCells(
   const nRows = rows.length + 1;
   const nCols = headers.length;
 
-  // Find the most recently inserted table matching dimensions
+  // Find the most recently inserted table matching dimensions (findLast not in older V8)
   const tables = (bodyContent ?? []).filter((e: any) => e.table);
-  const tableElem = tables.findLast((e: any) => e.table.rows === nRows && e.table.columns === nCols);
+  let tableElem: any = null;
+  for (let ti = tables.length - 1; ti >= 0; ti--) {
+    if (tables[ti].table.rows === nRows && tables[ti].table.columns === nCols) {
+      tableElem = tables[ti];
+      break;
+    }
+  }
   if (!tableElem) return;
 
   const allData = [headers, ...rows];
