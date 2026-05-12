@@ -256,12 +256,11 @@ npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID --name google-workspace</pre>
     env.TOKENS_KV,
   );
 
-  // Issue proxy JWT and store as pending for /token to collect (TTL 2 min)
-  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
-  const tempCode = crypto.randomUUID();
-  await env.OAUTH_KV.put(`pending_jwt:${tempCode}`, proxyJWT, { expirationTtl: 600 });
+  // Issue tempCode as a self-contained signed JWT (no KV write needed).
+  // Eliminates KV eventual-consistency race: /token verifies the JWT directly.
+  const tempCode = await signJWT({ sub, type: "auth_code" }, env.JWT_SECRET, 120); // 2 min TTL
 
-  console.log(`[callback] SUCCESS sub=${sub}, tempCode=${tempCode}`);
+  console.log(`[callback] SUCCESS sub=${sub}, tempCode issued (JWT, no KV)`);
 
     const clientRedirect = new URL(stateRecord.redirectUri);
     clientRedirect.searchParams.set("code",  tempCode);
@@ -342,17 +341,17 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     return Response.json({ error: "invalid_request", error_description: "Missing code" }, { status: 400 });
   }
 
-  // Retrieve the proxy JWT that /callback created
-  const proxyJWT = await env.OAUTH_KV.get(`pending_jwt:${code}`);
-  if (!proxyJWT) {
-    console.error(`[token] pending_jwt not found for code=${code}`);
+  // Verify tempCode as a self-contained JWT (no KV read needed).
+  // Fixes KV eventual-consistency race condition.
+  const codePayload = await verifyJWT(code, env.JWT_SECRET);
+  if (!codePayload || codePayload.type !== "auth_code" || !codePayload.sub) {
+    console.error(`[token] auth_code JWT invalid or expired`);
     return Response.json({ error: "invalid_grant", error_description: "Code expired or already used. Please reconnect." }, { status: 400 });
   }
-  await env.OAUTH_KV.delete(`pending_jwt:${code}`);
+  const sub = codePayload.sub as string;
 
-  // Issue refresh token with same sub
-  const payload = await verifyJWT(proxyJWT, env.JWT_SECRET);
-  const sub = (payload?.sub as string) || "";
+  // Issue access JWT + refresh token
+  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
   const refreshJWT = await signJWT({ sub, type: "refresh" }, env.JWT_SECRET, 90 * 24 * 3600);
 
   console.log(`[token] AUTH_CODE SUCCESS — issued JWT + refresh_token for sub=${sub}`);
