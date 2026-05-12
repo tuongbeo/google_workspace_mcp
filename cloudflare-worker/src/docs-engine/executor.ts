@@ -30,23 +30,8 @@ export async function executePass2(
 
   const warnings: string[] = [];
 
-  // Separate tables (no placeholder) from inline rich elements
-  const tableElements = richElements.filter(el => el.type === "rich_link" && el.url?.startsWith("{"));
-  const inlineElements = richElements.filter(el => !(el.type === "rich_link" && el.url?.startsWith("{")));
-
-  // Fill tables (no placeholder search needed)
-  for (const el of tableElements) {
-    try {
-      const tableData = JSON.parse(el.url!);
-      await fillTableCells(accessToken, documentId, tableData, tabId);
-    } catch (err: any) {
-      warnings.push(`Failed to fill table: ${err.message}`);
-    }
-  }
-
-  if (!inlineElements.length) return { warnings };
-
-  // Re-read document to find inline element placeholders
+  // All rich elements (images, mentions, footnotes, TOC, tables) use placeholders
+  // Re-read document to find all placeholders at once
   const path = tabId ? "?includeTabsContent=true" : "";
   const doc = await docsRequest(accessToken, documentId, "GET", path) as any;
 
@@ -61,7 +46,7 @@ export async function executePass2(
   const docText = buildDocText(bodyContent);
 
   const located: Array<{ el: RichElement; idx: number }> = [];
-  for (const el of inlineElements) {
+  for (const el of richElements) {
     const idx = findPlaceholderDocIndex(docText, el.placeholder);
     if (idx === null) {
       warnings.push(`Placeholder not found: ${el.placeholder} (${el.type})`);
@@ -70,7 +55,7 @@ export async function executePass2(
     located.push({ el, idx });
   }
 
-  // Sort descending by index
+  // Process in descending order to avoid index drift
   located.sort((a, b) => b.idx - a.idx);
 
   for (const { el, idx } of located) {
@@ -124,13 +109,30 @@ async function insertRichElement(
 
     case "mention": {
       if (!el.email) { warnings.push("Mention missing email"); return; }
-      const personProps: Record<string, unknown> = { email: el.email };
-      if (el.name) personProps.name = el.name;
-      const chipReqs: object[] = [
-        deleteReq,
-        { insertPerson: { personProperties: personProps, location: loc } },
-      ];
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: chipReqs });
+      // Step 1: replaceAllText placeholder → unique marker
+      const markerText = `__MNT_${el.email.replace(/[@.]/g, "_")}__`;
+      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        requests: [{ replaceAllText: {
+          containsText: { text: el.placeholder, matchCase: true },
+          replaceText: markerText,
+        }}],
+      });
+      // Step 2: re-read to find exact marker index
+      const docM = await docsRequest(accessToken, documentId, "GET", tabId ? "?includeTabsContent=true" : "") as any;
+      const bodyM = tabId ? findTab(docM.tabs, tabId)?.documentTab?.body?.content : docM.body?.content;
+      const dtM = buildDocText(bodyM ?? []);
+      const mPos = dtM.text.indexOf(markerText);
+      if (mPos === -1) { warnings.push(`Mention marker not found for ${el.email}`); return; }
+      const mIdx = dtM.docIndices[mPos] ?? (1 + mPos);
+      const mEnd = mIdx + markerText.length;
+      // Step 3: delete marker + insert chip (email only — no name field)
+      const chipLoc = tabId ? { index: mIdx, tabId } : { index: mIdx };
+      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        requests: [
+          { deleteContentRange: { range: tabId ? { startIndex: mIdx, endIndex: mEnd, tabId } : { startIndex: mIdx, endIndex: mEnd } } },
+          { insertPerson: { personProperties: { email: el.email }, location: chipLoc } },
+        ],
+      });
       break;
     }
 
@@ -158,13 +160,29 @@ async function insertRichElement(
     }
 
     case "rich_link": {
-      // Used for table-fill: el.url contains JSON { headers, rows, segIdx }
+      // Table: delete placeholder, insert table, fill cells
       if (!el.url) break;
       try {
-        const tableData = JSON.parse(el.url);
+        const tableData = JSON.parse(el.url) as {
+          headers: string[]; rows: string[][];
+          nRows: number; nCols: number;
+        };
+        if (!tableData.nCols || tableData.nCols < 1) {
+          warnings.push(`Table has invalid nCols=${tableData.nCols}`);
+          break;
+        }
+        // Delete placeholder + insert table at same location
+        const plEnd = idx + el.placeholder.length;
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [
+            { deleteContentRange: { range: tabId ? { startIndex: idx, endIndex: plEnd, tabId } : { startIndex: idx, endIndex: plEnd } } },
+            { insertTable: { rows: tableData.nRows, columns: tableData.nCols, location: { index: idx, ...(tabId ? { tabId } : {}) } } },
+          ],
+        });
+        // Re-read and fill cells
         await fillTableCells(accessToken, documentId, tableData, tabId);
-      } catch (_) {
-        // Not a table-fill marker, treat as regular rich link
+      } catch (err: any) {
+        warnings.push(`Failed to insert table: ${err.message}`);
       }
       break;
     }

@@ -495,8 +495,8 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
 
       const chipLoc: Record<string, unknown> = { index: chipIndex };
       if (tab_id) chipLoc.tabId = tab_id;
+      // insertPerson does NOT accept name field — email only
       const personProperties: Record<string, unknown> = { email };
-      if (name) personProperties.name = name;
       requests.push({ insertPerson: { personProperties, location: chipLoc } });
 
       if (suffix_text) {

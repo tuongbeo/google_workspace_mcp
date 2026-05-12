@@ -16,13 +16,13 @@ export function hexToRgb(hex: string) {
   };
 }
 
-// ── Placeholders ──────────────────────────────────────────────────────────────
-// Fixed 10-char: «TAG001»  (2 guillemets + 3 tag + 3 id + 2 guillemets = 10 chars)
+// ── Placeholders — ASCII-safe ─────────────────────────────────────────────────
+// Format: __TAG_NNN__  = 12 chars (safe for Google Docs replaceAllText API)
 
 let _counter = 0;
-function uid(): string { return (++_counter).toString(36).padStart(3, "0"); }
-function makePH(tag: string): string { return `\u00AB${tag}${uid()}\u00BB`; }
-export const PH_LEN = 10;
+function uid(): string { return (++_counter).toString(10).padStart(3, "0"); }
+function makePH(tag: string): string { return `__${tag}_${uid()}__`; }
+export const PH_LEN = 12; // __XXX_NNN__ = 12 chars
 
 let _rich: RichElement[] = [];
 
@@ -174,11 +174,18 @@ export function buildExecutionPlan(
       case "code_block":      segText = node.content.replace(/\n$/, "") + "\n"; break;
       case "bullet_list":     segText = buildListText(node.items); break;
       case "table": {
-        segText = "\n";
+        // Insert placeholder text (will be replaced by actual table in pass2)
+        const tblPH = makePH("TBL");
+        segText = tblPH + "\n";
         _rich.push({
           type: "rich_link",
-          placeholder: `\u00ABTBL${uid()}\u00BB`,
-          url: JSON.stringify({ headers: node.data.headers, rows: node.data.rows }),
+          placeholder: tblPH,
+          url: JSON.stringify({
+            headers: node.data.headers,
+            rows: node.data.rows,
+            nRows: node.data.rows.length + 1,
+            nCols: node.data.headers.length,
+          }),
         });
         break;
       }

@@ -293,18 +293,25 @@ export function parseMarkdown(input: string): DocNode[] {
       let inHead = false;
       let inBody = false;
       let currentRow: string[] = [];
+      let inRow = false;
 
       while (i < tokens.length && tokens[i].type !== "table_close") {
         const cur = tokens[i];
         if (cur.type === "thead_open") { inHead = true; inBody = false; }
         else if (cur.type === "thead_close") { inHead = false; }
         else if (cur.type === "tbody_open") { inBody = true; }
-        else if (cur.type === "tr_open") { currentRow = []; }
+        else if (cur.type === "tbody_close") { inBody = false; }
+        else if (cur.type === "tr_open") { currentRow = []; inRow = true; }
         else if (cur.type === "tr_close") {
-          if (inBody) rows.push(currentRow);
+          if (inBody && inRow) rows.push(currentRow);
+          inRow = false;
         }
-        else if ((cur.type === "th" || cur.type === "td") && cur.children) {
-          const cellText = (cur.children as any[]).map((c: any) => c.content || "").join("");
+        // markdown-it emits cell content as "inline" tokens (not "th"/"td")
+        else if (cur.type === "inline" && inRow) {
+          const cellText = (cur.children as any[] || [])
+            .map((c: any) => c.content || "")
+            .join("")
+            .trim();
           if (inHead) headers.push(cellText);
           else currentRow.push(cellText);
         }
