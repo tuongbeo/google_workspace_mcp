@@ -186,17 +186,17 @@ export function parseMarkdown(input: string): DocNode[] {
     if (t.type === "paragraph_open") {
       const inlineToken = tokens[i + 1];
       if (inlineToken) {
-        const raw = inlineToken.content;
+        const raw = inlineToken.content.trim();
 
-        // Skip footnote definition paragraphs — they are metadata, not body content
-        // [^id]: text gets parsed as a paragraph by markdown-it
-        if (/^\[\^[^\]]+\]:\s*.+/.test(raw.trim())) {
-          i += 3;
-          continue;
-        }
+        // Sentinel: \pagebreak and \toc
+        if (raw === "\u0002PAGEBREAK\u0003") { nodes.push({ type: "page_break" }); i += 3; continue; }
+        if (raw === "\u0002TOC\u0003") { nodes.push({ type: "toc" }); i += 3; continue; }
 
-        // Check for standalone image
-        const imgOnlyMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(raw.trim());
+        // Skip footnote definition paragraphs
+        if (/^\[\^[^\]]+\]:\s*.+/.test(raw)) { i += 3; continue; }
+
+        // Standalone image
+        const imgOnlyMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
         if (imgOnlyMatch) {
           let alt = imgOnlyMatch[1];
           const src = imgOnlyMatch[2];

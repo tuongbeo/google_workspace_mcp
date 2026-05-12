@@ -1,21 +1,11 @@
 /**
- * docs-engine/builder.ts  v3
- *
- * Fixes vs v2:
- *  - Heading paraStyle: endIndex = startIdx + text.length - 1 (exclude trailing \n)
- *  - footnote_def nodes filtered from fullText build AND from contentNodes
- *  - \pagebreak / \toc parser sentinel fix: also detect in paragraph content
- *  - Placeholder length: use actual byte length via Buffer-free approach
- *  - Checked checkbox items: apply strikethrough + muted color
- *  - buildDocText: include ALL text runs including list items
- *  - fillTableCells: replace findLast with manual reverse loop (V8 compat)
- *  - Justify alignment support via opts.alignment
+ * docs-engine/builder.ts  v4
+ * CRITICAL FIX: All non-heading paragraphs now explicitly set NORMAL_TEXT
+ * to prevent Google Docs from inheriting heading style from previous paragraph.
  */
 
 import type { DocNode, InlineNode, ListItem, RichElement, ExecutionPlan } from "./types";
 import { getTheme, getFontPair, deriveDocTokens } from "../styles";
-
-// ── Hex → RGB ────────────────────────────────────────────────────────────────
 
 export function hexToRgb(hex: string) {
   const h = hex.replace("#", "");
@@ -26,13 +16,13 @@ export function hexToRgb(hex: string) {
   };
 }
 
-// ── Placeholders — fixed 10-char each ────────────────────────────────────────
-// Format: «TAG001»  where TAG = 3 chars, id = 3 chars → total 8 + 2 guillemets = 10
+// ── Placeholders ──────────────────────────────────────────────────────────────
+// Fixed 10-char: «TAG001»  (2 guillemets + 3 tag + 3 id + 2 guillemets = 10 chars)
 
 let _counter = 0;
 function uid(): string { return (++_counter).toString(36).padStart(3, "0"); }
 function makePH(tag: string): string { return `\u00AB${tag}${uid()}\u00BB`; }
-export const PH_LEN = 10; // «XXX000» byte length in BMP
+export const PH_LEN = 10;
 
 let _rich: RichElement[] = [];
 
@@ -57,7 +47,7 @@ function tocPH(): string {
   return ph;
 }
 
-// ── Inline → text (with placeholders) ────────────────────────────────────────
+// ── Inline → plain text ───────────────────────────────────────────────────────
 
 function inlinesToText(nodes: InlineNode[]): string {
   return nodes.map(n => {
@@ -75,16 +65,16 @@ function inlinesToText(nodes: InlineNode[]): string {
   }).join("");
 }
 
-// ── Request builders ──────────────────────────────────────────────────────────
+// ── Request helpers ───────────────────────────────────────────────────────────
 
-function textStyleReq(start: number, end: number, tabId: string | undefined, style: Record<string, unknown>): object {
-  const range: Record<string, unknown> = { startIndex: start, endIndex: end };
+function textStyleReq(s: number, e: number, tabId: string | undefined, style: Record<string, unknown>): object {
+  const range: Record<string, unknown> = { startIndex: s, endIndex: e };
   if (tabId) range.tabId = tabId;
   return { updateTextStyle: { range, textStyle: style, fields: Object.keys(style).join(",") } };
 }
 
-function paraStyleReq(start: number, end: number, tabId: string | undefined, style: Record<string, unknown>, fields: string): object {
-  const range: Record<string, unknown> = { startIndex: start, endIndex: end };
+function paraStyleReq(s: number, e: number, tabId: string | undefined, style: Record<string, unknown>, fields: string): object {
+  const range: Record<string, unknown> = { startIndex: s, endIndex: e };
   if (tabId) range.tabId = tabId;
   return { updateParagraphStyle: { range, paragraphStyle: style, fields } };
 }
@@ -97,16 +87,16 @@ function applyInlineStyles(nodes: InlineNode[], base: number, tabId: string | un
     switch (n.type) {
       case "text": rel += n.content.length; break;
       case "bold": case "italic": case "strikethrough": case "underline": {
-        const s = rel;
-        rel = applyInlineStyles(n.children, base + s, tabId, reqs);
-        const styleKey = n.type === "bold" ? "bold" : n.type === "italic" ? "italic"
+        const start = rel;
+        rel = applyInlineStyles(n.children, base + start, tabId, reqs);
+        const key = n.type === "bold" ? "bold" : n.type === "italic" ? "italic"
           : n.type === "strikethrough" ? "strikethrough" : "underline";
-        if (rel > s) reqs.push(textStyleReq(base + s, base + rel, tabId, { [styleKey]: true }));
+        if (rel > start) reqs.push(textStyleReq(base + start, base + rel, tabId, { [key]: true }));
         break;
       }
       case "code": {
-        const s = rel; rel += n.content.length;
-        reqs.push(textStyleReq(base + s, base + rel, tabId, {
+        const start = rel; rel += n.content.length;
+        reqs.push(textStyleReq(base + start, base + rel, tabId, {
           weightedFontFamily: { fontFamily: "Roboto Mono" },
           fontSize: { magnitude: 10, unit: "PT" },
           backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } },
@@ -114,9 +104,9 @@ function applyInlineStyles(nodes: InlineNode[], base: number, tabId: string | un
         break;
       }
       case "link": {
-        const s = rel;
-        rel = applyInlineStyles(n.children, base + s, tabId, reqs);
-        if (rel > s) reqs.push(textStyleReq(base + s, base + rel, tabId, {
+        const start = rel;
+        rel = applyInlineStyles(n.children, base + start, tabId, reqs);
+        if (rel > start) reqs.push(textStyleReq(base + start, base + rel, tabId, {
           link: { url: n.url },
           foregroundColor: { color: { rgbColor: { red: 0.07, green: 0.36, blue: 0.8 } } },
           underline: true,
@@ -132,11 +122,13 @@ function applyInlineStyles(nodes: InlineNode[], base: number, tabId: string | un
   return rel;
 }
 
-// ── List text builder ─────────────────────────────────────────────────────────
+// ── List text ─────────────────────────────────────────────────────────────────
 
 function buildListText(items: ListItem[]): string {
-  return items.map(item => inlinesToText(item.children) + "\n"
-    + (item.subItems?.length ? buildListText(item.subItems) : "")).join("");
+  return items.map(item =>
+    inlinesToText(item.children) + "\n" +
+    (item.subItems?.length ? buildListText(item.subItems) : "")
+  ).join("");
 }
 
 // ── Main builder ──────────────────────────────────────────────────────────────
@@ -158,16 +150,15 @@ export function buildExecutionPlan(
   const tabId = opts.tabId;
   const alignment = opts.alignment ?? "left";
 
-  // Collect footnote defs (these must NOT be inserted into body text)
+  // Collect footnote defs (NOT inserted into body)
   const footnoteDefs = new Map<string, string>();
   for (const n of nodes) {
     if (n.type === "footnote_def") footnoteDefs.set(n.id, n.content);
   }
 
-  // Filter out footnote_def nodes — they are metadata only, not body content
   const contentNodes = nodes.filter(n => n.type !== "footnote_def");
 
-  // ── Step 1: Build full text string + segment map ────────────────────────
+  // ── Build full text string ────────────────────────────────────────────────
 
   interface Seg { text: string; startIdx: number; node: DocNode }
   const segs: Seg[] = [];
@@ -176,15 +167,13 @@ export function buildExecutionPlan(
 
   for (const node of contentNodes) {
     let segText = "";
-
     switch (node.type) {
-      case "heading":      segText = inlinesToText(node.children) + "\n"; break;
-      case "paragraph":    segText = inlinesToText(node.children) + "\n"; break;
-      case "blockquote":   segText = inlinesToText(node.children) + "\n"; break;
-      case "code_block":   segText = node.content.replace(/\n$/, "") + "\n"; break;
-      case "bullet_list":  segText = buildListText(node.items); break;
+      case "heading":         segText = inlinesToText(node.children) + "\n"; break;
+      case "paragraph":       segText = inlinesToText(node.children) + "\n"; break;
+      case "blockquote":      segText = inlinesToText(node.children) + "\n"; break;
+      case "code_block":      segText = node.content.replace(/\n$/, "") + "\n"; break;
+      case "bullet_list":     segText = buildListText(node.items); break;
       case "table": {
-        // Placeholder newline; actual table inserted in pass2 via fillTableCells
         segText = "\n";
         _rich.push({
           type: "rich_link",
@@ -199,13 +188,12 @@ export function buildExecutionPlan(
       case "image":           segText = imgPH(node.url, node.alt, node.widthPt, node.heightPt) + "\n"; break;
       default:                segText = "\n"; break;
     }
-
     segs.push({ text: segText, startIdx: cursor, node });
     fullText += segText;
     cursor += segText.length;
   }
 
-  // ── Step 2: Single insertText ────────────────────────────────────────────
+  // ── Single insertText ─────────────────────────────────────────────────────
 
   const pass1Requests: object[] = [];
 
@@ -215,10 +203,12 @@ export function buildExecutionPlan(
     pass1Requests.push({ insertText: { location: loc, text: fullText } });
   }
 
-  // ── Step 3: Style requests ────────────────────────────────────────────────
-  // KEY FIX: paragraph style endIndex must EXCLUDE the trailing \n
-  // Google Docs paragraph style applies to the paragraph marker before \n.
-  // Using endIdx (which includes \n) causes the style to leak into the next paragraph.
+  // ── Style requests ────────────────────────────────────────────────────────
+  //
+  // CRITICAL RULE: Every segment that is NOT a heading must explicitly set
+  // namedStyleType = "NORMAL_TEXT". Google Docs inherits the namedStyleType
+  // from the previous paragraph when text is inserted, so after a heading the
+  // next paragraph will silently become that heading style unless overridden.
 
   const hMap: Record<number, string> = {
     1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3",
@@ -228,12 +218,14 @@ export function buildExecutionPlan(
   for (const seg of segs) {
     const { startIdx, node, text } = seg;
     const endIdx = startIdx + text.length;
-    // paraEnd: endIndex for paragraph style = exclude trailing \n
+    // paraEnd excludes trailing \n — prevents style leaking to next paragraph
     const paraEnd = text.endsWith("\n") ? endIdx - 1 : endIdx;
 
+    if (paraEnd <= startIdx) continue; // empty segment, skip
+
     switch (node.type) {
+
       case "heading": {
-        // Apply heading style only to the heading paragraph (not including \n)
         pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
           { namedStyleType: hMap[node.level] }, "namedStyleType"));
         applyInlineStyles(node.children, startIdx, tabId, pass1Requests);
@@ -241,7 +233,9 @@ export function buildExecutionPlan(
       }
 
       case "paragraph": {
-        // Apply justify alignment to body paragraphs if requested
+        // Always reset to NORMAL_TEXT — prevents H2 inheritance from previous heading
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
         if (alignment === "justify") {
           pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
             { alignment: "JUSTIFIED" }, "alignment"));
@@ -251,6 +245,9 @@ export function buildExecutionPlan(
       }
 
       case "blockquote": {
+        // Reset to NORMAL_TEXT then apply blockquote indent+style
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
         pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId, {
           indentStart: { magnitude: 36, unit: "PT" },
           indentFirstLine: { magnitude: 0, unit: "PT" },
@@ -265,14 +262,17 @@ export function buildExecutionPlan(
       }
 
       case "code_block": {
-        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
-          indentStart: { magnitude: 18, unit: "PT" },
-        }, "indentStart"));
-        pass1Requests.push(textStyleReq(startIdx, paraEnd, tabId, {
-          weightedFontFamily: { fontFamily: "Roboto Mono" },
-          fontSize: { magnitude: 10, unit: "PT" },
-          backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } },
-        }));
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId,
+          { indentStart: { magnitude: 18, unit: "PT" } }, "indentStart"));
+        if (paraEnd > startIdx) {
+          pass1Requests.push(textStyleReq(startIdx, paraEnd, tabId, {
+            weightedFontFamily: { fontFamily: "Roboto Mono" },
+            fontSize: { magnitude: 10, unit: "PT" },
+            backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } },
+          }));
+        }
         break;
       }
 
@@ -280,22 +280,24 @@ export function buildExecutionPlan(
         const bulletPreset = node.listType === "numbered" ? "NUMBERED_DECIMAL_ALPHA_ROMAN"
           : node.listType === "checkbox" ? "BULLET_CHECKBOX"
           : "BULLET_DISC_CIRCLE_SQUARE";
-
-        // createParagraphBullets range: endIndex should be one before the last \n
         const range: Record<string, unknown> = { startIndex: startIdx, endIndex: endIdx - 1 };
         if (tabId) range.tabId = tabId;
         pass1Requests.push({ createParagraphBullets: { range, bulletPreset } });
 
-        // Apply inline styles per item + strikethrough for checked items
+        // Reset each list item to NORMAL_TEXT
         let itemCursor = startIdx;
         for (const item of node.items) {
-          const itemPlainText = inlinesToText(item.children);
-          const itemLen = itemPlainText.length;
+          const itemText = inlinesToText(item.children);
+          const itemLen = itemText.length;
+          const itemParaEnd = itemCursor + itemLen;
+          if (itemParaEnd > itemCursor) {
+            pass1Requests.push(paraStyleReq(itemCursor, itemParaEnd, tabId,
+              { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+          }
           applyInlineStyles(item.children, itemCursor, tabId, pass1Requests);
-
-          // FIX: checked checkbox items → strikethrough + muted color
-          if (node.listType === "checkbox" && item.checked === true) {
-            pass1Requests.push(textStyleReq(itemCursor, itemCursor + itemLen, tabId, {
+          // Checked item → strikethrough + muted
+          if (node.listType === "checkbox" && item.checked === true && itemParaEnd > itemCursor) {
+            pass1Requests.push(textStyleReq(itemCursor, itemParaEnd, tabId, {
               strikethrough: true,
               foregroundColor: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
             }));
@@ -306,7 +308,9 @@ export function buildExecutionPlan(
       }
 
       case "horizontal_rule": {
-        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId, {
+        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
           borderBottom: {
             color: { color: { rgbColor: { red: 0.7, green: 0.7, blue: 0.7 } } },
             width: { magnitude: 1, unit: "PT" },
@@ -324,10 +328,28 @@ export function buildExecutionPlan(
         });
         break;
       }
+
+      case "table": {
+        // The \n placeholder paragraph — reset to NORMAL_TEXT
+        if (paraEnd > startIdx) {
+          pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+            { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+        }
+        break;
+      }
+
+      case "image": {
+        // The image placeholder paragraph — reset to NORMAL_TEXT
+        if (paraEnd > startIdx) {
+          pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
+            { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+        }
+        break;
+      }
     }
   }
 
-  // ── Step 4: Resolve footnote content ────────────────────────────────────
+  // ── Resolve footnote content ──────────────────────────────────────────────
 
   for (const el of _rich) {
     if (el.type === "footnote" && el.name) {
@@ -335,13 +357,9 @@ export function buildExecutionPlan(
     }
   }
 
-  // ── Step 5: Theme requests ────────────────────────────────────────────────
+  // ── Theme requests ────────────────────────────────────────────────────────
 
-  const themeRequests = buildThemeRequests(
-    opts.theme ?? "corporate",
-    opts.fontPair ?? "arial_roboto",
-    alignment,
-  );
+  const themeRequests = buildThemeRequests(opts.theme ?? "corporate", opts.fontPair ?? "arial_roboto", alignment);
 
   const stats = {
     sections: contentNodes.filter(n => n.type === "heading").length,
@@ -362,11 +380,8 @@ function buildThemeRequests(themeName: string, fontPairName: string, alignment: 
   const fonts = getFontPair(fontPairName as any);
   const tok = deriveDocTokens(colors, fonts);
 
-  function ns(
-    styleType: string, colorHex: string, sizePt: number,
-    bold: boolean, font: string, abovePt: number, belowPt: number,
-    lineSpacing?: number, align?: string
-  ) {
+  function ns(styleType: string, colorHex: string, sizePt: number, bold: boolean, font: string,
+              abovePt: number, belowPt: number, lineSpacing?: number, align?: string) {
     return {
       updateNamedStyle: {
         namedStyle: {
@@ -393,13 +408,13 @@ function buildThemeRequests(themeName: string, fontPairName: string, alignment: 
 
   return [
     ns("NORMAL_TEXT", tok.normal.color, tok.normal.fontSize, false, tok.normal.fontFamily, 0, 6, 115, bodyAlign),
-    ns("HEADING_1", tok.heading1.color, tok.heading1.fontSize, tok.heading1.bold, tok.heading1.fontFamily, 16, 6),
-    ns("HEADING_2", tok.heading2.color, tok.heading2.fontSize, tok.heading2.bold, tok.heading2.fontFamily, 14, 4),
-    ns("HEADING_3", tok.heading3.color, tok.heading3.fontSize, tok.heading3.bold, tok.heading3.fontFamily, 12, 4),
-    ns("HEADING_4", tok.heading4.color, tok.heading4.fontSize, tok.heading4.bold, tok.heading4.fontFamily, 10, 2),
-    ns("HEADING_5", tok.heading4.color, 11, false, tok.heading4.fontFamily, 8, 2),
-    ns("HEADING_6", tok.heading4.color, 11, false, tok.heading4.fontFamily, 6, 2),
-    ns("TITLE", tok.heading1.color, 26, true, tok.heading1.fontFamily, 0, 10),
-    ns("SUBTITLE", tok.heading2.color, 14, false, tok.heading2.fontFamily, 0, 8),
+    ns("HEADING_1",   tok.heading1.color, tok.heading1.fontSize, tok.heading1.bold, tok.heading1.fontFamily, 16, 6),
+    ns("HEADING_2",   tok.heading2.color, tok.heading2.fontSize, tok.heading2.bold, tok.heading2.fontFamily, 14, 4),
+    ns("HEADING_3",   tok.heading3.color, tok.heading3.fontSize, tok.heading3.bold, tok.heading3.fontFamily, 12, 4),
+    ns("HEADING_4",   tok.heading4.color, tok.heading4.fontSize, tok.heading4.bold, tok.heading4.fontFamily, 10, 2),
+    ns("HEADING_5",   tok.heading4.color, 11, false, tok.heading4.fontFamily, 8, 2),
+    ns("HEADING_6",   tok.heading4.color, 11, false, tok.heading4.fontFamily, 6, 2),
+    ns("TITLE",       tok.heading1.color, 26, true,  tok.heading1.fontFamily, 0, 10),
+    ns("SUBTITLE",    tok.heading2.color, 14, false, tok.heading2.fontFamily, 0, 8),
   ];
 }

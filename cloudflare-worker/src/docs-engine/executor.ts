@@ -62,12 +62,12 @@ export async function executePass2(
 
   const located: Array<{ el: RichElement; idx: number }> = [];
   for (const el of inlineElements) {
-    const idx = docText.text.indexOf(el.placeholder);
-    if (idx === -1) {
+    const idx = findPlaceholderDocIndex(docText, el.placeholder);
+    if (idx === null) {
       warnings.push(`Placeholder not found: ${el.placeholder} (${el.type})`);
       continue;
     }
-    located.push({ el, idx: docText.offset + idx });
+    located.push({ el, idx });
   }
 
   // Sort descending by index
@@ -124,27 +124,13 @@ async function insertRichElement(
 
     case "mention": {
       if (!el.email) { warnings.push("Mention missing email"); return; }
-      const insertReq = {
-        insertText: { location: loc, text: el.name ?? el.email },
-      };
-      const body: Record<string, unknown> = { requests: [deleteReq, insertReq] };
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
-
-      // Now insert actual person chip — need to re-find index
-      const doc2 = await docsRequest(accessToken, documentId, "GET", tabId ? "?includeTabsContent=true" : "") as any;
-      const bodyContent2 = tabId ? findTab(doc2.tabs, tabId)?.documentTab?.body?.content : doc2.body?.content;
-      const textInfo2 = buildDocText(bodyContent2 ?? []);
-      const nameIdx = textInfo2.text.indexOf(el.name ?? el.email);
-      if (nameIdx !== -1) {
-        const actualIdx = textInfo2.offset + nameIdx;
-        const endIdx = actualIdx + (el.name ?? el.email).length;
-        const chipReqs: object[] = [
-          { deleteContentRange: { range: tabId ? { startIndex: actualIdx, endIndex: endIdx, tabId } : { startIndex: actualIdx, endIndex: endIdx } } },
-          { insertPerson: { mentionedPersonProperties: { email: el.email }, location: tabId ? { index: actualIdx, tabId } : { index: actualIdx } } },
-        ];
-        const body2: Record<string, unknown> = { requests: chipReqs };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body2);
-      }
+      const personProps: Record<string, unknown> = { email: el.email };
+      if (el.name) personProps.name = el.name;
+      const chipReqs: object[] = [
+        deleteReq,
+        { insertPerson: { personProperties: personProps, location: loc } },
+      ];
+      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: chipReqs });
       break;
     }
 
@@ -251,15 +237,30 @@ function findTab(tabList: any[], tabId: string): any | null {
   return null;
 }
 
-/** Flatten ALL body content (including list items, table cells) to string + offset */
-function buildDocText(bodyContent: any[]): { text: string; offset: number } {
-  let text = "";
+/**
+ * Build a searchable text string from doc body content.
+ * Returns text + parallel docIndices array for accurate placeholder→docIndex mapping.
+ */
+interface DocTextResult {
+  text: string;
+  docIndices: number[]; // parallel array: docIndices[i] = Google Doc index for text[i]
+}
+
+function buildDocText(bodyContent: any[]): DocTextResult {
+  const chars: string[] = [];
+  const docIndices: number[] = [];
 
   function walkContent(content: any[]) {
     for (const elem of content ?? []) {
       if (elem.paragraph) {
         for (const pe of elem.paragraph.elements ?? []) {
-          if (pe.textRun?.content) text += pe.textRun.content;
+          if (pe.textRun?.content && pe.startIndex !== undefined) {
+            const t = pe.textRun.content as string;
+            for (let ci = 0; ci < t.length; ci++) {
+              chars.push(t[ci]);
+              docIndices.push(pe.startIndex + ci);
+            }
+          }
         }
       } else if (elem.table) {
         for (const row of elem.table.tableRows ?? []) {
@@ -272,7 +273,16 @@ function buildDocText(bodyContent: any[]): { text: string; offset: number } {
   }
 
   walkContent(bodyContent);
-  return { text, offset: 1 }; // Google Docs index starts at 1
+  return { text: chars.join(""), docIndices };
+}
+
+/**
+ * Find placeholder in doc text and return the actual Google Doc start index.
+ */
+function findPlaceholderDocIndex(docText: DocTextResult, placeholder: string): number | null {
+  const pos = docText.text.indexOf(placeholder);
+  if (pos === -1) return null;
+  return docText.docIndices[pos] ?? (1 + pos); // fallback to offset+pos
 }
 
 async function fillTableCells(
