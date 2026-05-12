@@ -119,18 +119,32 @@ async function insertRichElement(
         ? { startIndex: idx, endIndex: phEnd, tabId }
         : { startIndex: idx, endIndex: phEnd };
       try {
+        // Insert chip FIRST at placeholder start — this shifts placeholder right by 1
+        // Then delete the now-shifted placeholder [idx+1, idx+1+phLen)
+        const chipResult = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [{ insertPerson: { personProperties: { email: el.email }, location: chipLoc } }],
+        }) as any;
+        // Check if insertPerson reply indicates success (returns personSuggestedChange or similar)
+        const chipReply = chipResult?.replies?.[0];
+        console.log(`[mention] insertPerson reply for ${el.email}:`, JSON.stringify(chipReply));
+        // After insertPerson, placeholder shifted right by 1 char
+        const shiftedRange = tabId
+          ? { startIndex: idx + 1, endIndex: phEnd + 1, tabId }
+          : { startIndex: idx + 1, endIndex: phEnd + 1 };
         await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-          requests: [
-            { deleteContentRange: { range: deleteRange } },
-            { insertPerson: { personProperties: { email: el.email }, location: chipLoc } },
-          ],
+          requests: [{ deleteContentRange: { range: shiftedRange } }],
         });
       } catch (err: any) {
-        // If insertPerson fails (e.g. email not resolvable), fall back to @name text
+        // insertPerson failed — delete placeholder and insert @name text as fallback
         const displayName = el.name || el.email;
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-          requests: [{ insertText: { location: chipLoc, text: `@${displayName}` } }],
-        });
+        try {
+          await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+            requests: [{ deleteContentRange: { range: deleteRange } }],
+          });
+          await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+            requests: [{ insertText: { location: chipLoc, text: `@${displayName}` } }],
+          });
+        } catch (_) {}
         warnings.push(`insertPerson failed for ${el.email}, inserted as text: ${err.message}`);
       }
       break;
