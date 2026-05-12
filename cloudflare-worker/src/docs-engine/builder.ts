@@ -228,7 +228,9 @@ export function buildExecutionPlan(
     // paraEnd excludes trailing \n — prevents style leaking to next paragraph
     const paraEnd = text.endsWith("\n") ? endIdx - 1 : endIdx;
 
-    if (paraEnd <= startIdx) continue; // empty segment, skip
+    // NOTE: paraEnd may equal startIdx for single-\n segments (HR, page_break, table, image)
+    // Those cases use endIdx directly below, so we only skip truly empty segments
+    if (endIdx <= startIdx) continue;
 
     switch (node.type) {
 
@@ -315,8 +317,8 @@ export function buildExecutionPlan(
       }
 
       case "horizontal_rule": {
-        // HR: a paragraph with borderBottom. Range uses endIdx (includes \n char)
-        // namedStyleType reset needed to prevent heading inheritance
+        // HR paragraph has segText="\n" so endIdx = startIdx+1
+        // Apply borderBottom to the full range including the \n char
         pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
           namedStyleType: "NORMAL_TEXT",
           borderBottom: {
@@ -332,9 +334,17 @@ export function buildExecutionPlan(
       }
 
       case "page_break": {
-        pass1Requests.push({
-          insertPageBreak: { location: { index: startIdx, ...(tabId ? { tabId } : {}) } },
-        });
+        // Use pageBreakBefore on the NEXT paragraph instead of insertPageBreak.
+        // insertPageBreak inserts an extra char that shifts all subsequent indices.
+        // pageBreakBefore is a paragraph style that forces a page break before the
+        // paragraph WITHOUT inserting extra content — no index drift.
+        // We apply it to the \n paragraph itself (startIdx..endIdx).
+        pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
+          namedStyleType: "NORMAL_TEXT",
+          pageBreakBefore: true,
+          spaceAbove: { magnitude: 0, unit: "PT" },
+          spaceBelow: { magnitude: 0, unit: "PT" },
+        }, "namedStyleType,pageBreakBefore,spaceAbove,spaceBelow"));
         break;
       }
 
