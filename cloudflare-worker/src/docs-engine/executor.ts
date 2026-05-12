@@ -15,11 +15,7 @@ export async function executePass1(
   tabId?: string
 ): Promise<void> {
   if (!plan.pass1Requests.length) return;
-
-  const body: Record<string, unknown> = { requests: plan.pass1Requests };
-  if (tabId) body.tabsCriteria = { tabIds: [tabId] };
-
-  await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
+  await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: plan.pass1Requests });
 }
 
 // ── Pass 2: Rich elements (images, mentions, footnotes, TOC) ─────────────────
@@ -34,11 +30,26 @@ export async function executePass2(
 
   const warnings: string[] = [];
 
-  // Re-read document to get current content with indices
+  // Separate tables (no placeholder) from inline rich elements
+  const tableElements = richElements.filter(el => el.type === "rich_link" && el.url?.startsWith("{"));
+  const inlineElements = richElements.filter(el => !(el.type === "rich_link" && el.url?.startsWith("{")));
+
+  // Fill tables (no placeholder search needed)
+  for (const el of tableElements) {
+    try {
+      const tableData = JSON.parse(el.url!);
+      await fillTableCells(accessToken, documentId, tableData, tabId);
+    } catch (err: any) {
+      warnings.push(`Failed to fill table: ${err.message}`);
+    }
+  }
+
+  if (!inlineElements.length) return { warnings };
+
+  // Re-read document to find inline element placeholders
   const path = tabId ? "?includeTabsContent=true" : "";
   const doc = await docsRequest(accessToken, documentId, "GET", path) as any;
 
-  // Get body content for the right tab
   let bodyContent: any[];
   if (tabId && doc.tabs) {
     const tab = findTab(doc.tabs, tabId);
@@ -47,12 +58,10 @@ export async function executePass2(
     bodyContent = doc.body?.content ?? [];
   }
 
-  // Build a flat text representation with indices for search
   const docText = buildDocText(bodyContent);
 
-  // Sort rich elements: process in reverse document order to avoid index drift
   const located: Array<{ el: RichElement; idx: number }> = [];
-  for (const el of richElements) {
+  for (const el of inlineElements) {
     const idx = docText.text.indexOf(el.placeholder);
     if (idx === -1) {
       warnings.push(`Placeholder not found: ${el.placeholder} (${el.type})`);
@@ -109,7 +118,6 @@ async function insertRichElement(
         },
       };
       const body: Record<string, unknown> = { requests: [deleteReq, insertReq] };
-      if (tabId) body.tabsCriteria = { tabIds: [tabId] };
       await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
       break;
     }
@@ -120,7 +128,6 @@ async function insertRichElement(
         insertText: { location: loc, text: el.name ?? el.email },
       };
       const body: Record<string, unknown> = { requests: [deleteReq, insertReq] };
-      if (tabId) body.tabsCriteria = { tabIds: [tabId] };
       await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
 
       // Now insert actual person chip — need to re-find index
@@ -136,7 +143,6 @@ async function insertRichElement(
           { insertPerson: { mentionedPersonProperties: { email: el.email }, location: tabId ? { index: actualIdx, tabId } : { index: actualIdx } } },
         ];
         const body2: Record<string, unknown> = { requests: chipReqs };
-        if (tabId) body2.tabsCriteria = { tabIds: [tabId] };
         await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body2);
       }
       break;
@@ -144,7 +150,6 @@ async function insertRichElement(
 
     case "footnote": {
       const body: Record<string, unknown> = { requests: [deleteReq, { insertFootnote: { location: loc } }] };
-      if (tabId) body.tabsCriteria = { tabIds: [tabId] };
       const result = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body) as any;
       const fnId = result.replies?.find((r: any) => r.insertFootnote)?.insertFootnote?.footnoteId;
       if (fnId && el.footnoteContent) {
@@ -163,7 +168,6 @@ async function insertRichElement(
           { insertTableOfContents: { location: loc } },
         ],
       };
-      if (tabId) body.tabsCriteria = { tabIds: [tabId] };
       await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
       break;
     }
@@ -301,7 +305,6 @@ async function fillTableCells(
 
   // Insert in reverse order
   const body: Record<string, unknown> = { requests: insertReqs.reverse() };
-  if (tabId) body.tabsCriteria = { tabIds: [tabId] };
   await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
 
   // Style header row (bold + theme color)
@@ -334,7 +337,6 @@ async function fillTableCells(
     }
     if (styleReqs.length) {
       const sb: Record<string, unknown> = { requests: styleReqs };
-      if (tabId) sb.tabsCriteria = { tabIds: [tabId] };
       try {
         await docsRequest(accessToken, documentId, "POST", ":batchUpdate", sb);
       } catch (_) { /* table style not critical */ }
