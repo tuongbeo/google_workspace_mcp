@@ -184,53 +184,6 @@ export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `File created: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
   }));
 
-  server.tool("import_to_google_doc",
-    "Import markdown or plain text as a Google Doc with professional formatting. " +
-    "Applies Anthropic document standards (Arial, H1=16pt, H2=14pt, H3=12pt, body=11pt, " +
-    "table borders, code blocks, links) via Google Drive's HTML converter.",
-    {
-      name: z.string(),
-      content: z.string().describe("Markdown or plain text content"),
-      parent_folder_id: z.string().optional(),
-      input_format: z.enum(["markdown", "html", "plain"]).optional().default("markdown")
-        .describe("markdown=convert to styled HTML (best quality); html=upload as-is; plain=raw text"),
-    },
-    { readOnlyHint: false },
-    withErrorHandler(async ({ name, content, parent_folder_id, input_format = "markdown" }) => {
-      const { accessToken } = await getCreds();
-      let uploadContent: string;
-      let contentType: string;
-      if (input_format === "markdown") {
-        uploadContent = markdownToHtml(content);
-        contentType = "text/html";
-      } else if (input_format === "html") {
-        uploadContent = content;
-        contentType = "text/html";
-      } else {
-        uploadContent = content;
-        contentType = "text/plain";
-      }
-      const metadata: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.document" };
-      if (parent_folder_id) metadata.parents = [parent_folder_id];
-      const form = new FormData();
-      form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
-      form.append("file", new Blob([uploadContent], { type: contentType }));
-      const resp = await fetch(
-        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink",
-        { method: "POST", headers: { Authorization: `Bearer ${accessToken}` }, body: form }
-      );
-      if (!resp.ok) throw new Error(`Import failed: ${await resp.text()}`);
-      const result = await resp.json() as any;
-      return {
-        content: [{ type: "text", text: [
-          `Imported as Google Doc: "${result.name}"`,
-          `ID: ${result.id}`,
-          `Format: ${input_format} → ${contentType}`,
-          `Link: ${result.webViewLink}`,
-        ].join("\n") }],
-      };
-    })
-  );
 
   server.tool("update_drive_file", "Update a Drive file's metadata (name, description, move to folder).", {
     file_id: z.string(),

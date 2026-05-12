@@ -26,6 +26,7 @@ import { registerDocsPhase2Tools } from "./tools/docs-phase2";
 import { registerSlidesPhase2Tools } from "./tools/slides-phase2";
 import { registerAppsScriptPhase2Tools } from "./tools/appsscript-phase2";
 import { registerConsolidatedTools } from "./tools/consolidated";
+import { registerWriteGoogleDocTool } from "./tools/write-google-doc";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -116,6 +117,7 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
   registerSlidesPhase2Tools(server, getCreds);
   registerAppsScriptPhase2Tools(server, getCreds);
   registerConsolidatedTools(server, getCreds);
+  registerWriteGoogleDocTool(server, getCreds);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

@@ -77,42 +77,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
 
-  server.tool("create_google_doc", "Create a new Google Doc.", {
-    title: z.string(),
-    content: z.string().optional(),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ title, content }) => {
-    const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, "", "POST", "", { title }) as any;
-    if (content) {
-      await docsRequest(accessToken, doc.documentId, "POST", ":batchUpdate", {
-        requests: [{ insertText: { location: { index: 1 }, text: content } }],
-      });
-    }
-    return { content: [{ type: "text", text: `Doc created: "${doc.title}"\nID: ${doc.documentId}\nURL: https://docs.google.com/document/d/${doc.documentId}/edit` }] };
-  }));
 
-  server.tool("append_to_google_doc", "Append text to an existing Google Doc. Supports multi-tab documents via tab_id.", {
-    document_id: z.string(),
-    text: z.string(),
-    tab_id: z.string().optional().describe(
-      "Tab ID to append into. If omitted, appends to the default tab (or the only tab for single-tab docs). " +
-      "Get tab IDs from get_doc_tabs."
-    ),
-  }, withErrorHandler(async ({ document_id, text, tab_id }) => {
-    const { accessToken } = await getCreds();
-    const endOfSegmentLocation: Record<string, unknown> = {};
-    if (tab_id) endOfSegmentLocation.tabId = tab_id;
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{
-        insertText: {
-          endOfSegmentLocation,
-          text: "\n" + text,
-        }
-      }],
-    });
-    const target = tab_id ? `tab ${tab_id}` : "default tab";
-    return { content: [{ type: "text", text: `Text appended to ${target} in document ${document_id}.` }] };
-  }));
 
   server.tool("modify_doc_text", "Replace text in a Google Doc (find and replace).", {
     document_id: z.string(),
@@ -168,34 +133,16 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `${element_type} inserted at index ${index}.` }] };
   }));
 
-  server.tool("update_paragraph_style", "Update paragraph style (heading, list) in a Google Doc.", {
-    document_id: z.string(),
-    start_index: z.number(),
-    end_index: z.number(),
-    style: z.enum(["NORMAL_TEXT", "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "TITLE", "SUBTITLE"]).optional(),
-    list_type: z.enum(["BULLET", "NUMBERED", "none"]).optional(),
-  }, withErrorHandler(async ({ document_id, start_index, end_index, style, list_type }) => {
-    const { accessToken } = await getCreds();
-    const requests: any[] = [];
-    if (style) {
-      requests.push({ updateParagraphStyle: { range: { startIndex: start_index, endIndex: end_index }, paragraphStyle: { namedStyleType: style }, fields: "namedStyleType" } });
-    }
-    if (list_type === "BULLET" || list_type === "NUMBERED") {
-      const presetStyle = list_type === "BULLET" ? "BULLET_DISC_CIRCLE_SQUARE" : "NUMBERED_DECIMAL_ALPHA_ROMAN";
-      requests.push({ createParagraphBullets: { range: { startIndex: start_index, endIndex: end_index }, bulletPreset: presetStyle } });
-    } else if (list_type === "none") {
-      requests.push({ deleteParagraphBullets: { range: { startIndex: start_index, endIndex: end_index } } });
-    }
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
-    return { content: [{ type: "text", text: `Paragraph style updated in range ${start_index}-${end_index}.` }] };
-  }));
 
   server.tool("batch_update_doc", "Execute multiple raw batchUpdate requests on a Google Doc.", {
     document_id: z.string(),
     requests: z.array(z.record(z.any())).describe("Array of Google Docs API batchUpdate request objects"),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, requests }) => {
+    tab_id: z.string().optional().describe("Tab ID for multi-tab docs — injects tabsCriteria into the request"),
+  }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, requests, tab_id }) => {
     const { accessToken } = await getCreds();
-    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests }) as any;
+    const body: Record<string, unknown> = { requests };
+    if (tab_id) body.tabsCriteria = { tabIds: [tab_id] };
+    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", body) as any;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations executed.` }] };
   }));
 
@@ -397,61 +344,8 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     return { content: [{ type: "text", text: `Table ${rows}×${cols} created and filled with ${insertRequests.length} cells.` }] };
   }));
 
-  server.tool("debug_table_structure", "Debug: get detailed structure of tables in a Google Doc (indices, rows, cells).", {
-    document_id: z.string(),
-    max_tables: z.number().optional().default(3),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, max_tables = 3 }) => {
-    const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
-    const tables = (doc.body?.content || []).filter((e: any) => e.table);
-    const lines = [`Doc: ${doc.title}`, `Tables found: ${tables.length}`, ""];
-    for (const [ti, tableElem] of tables.slice(0, max_tables).entries()) {
-      const t = tableElem.table;
-      lines.push(`=== Table ${ti + 1} [${tableElem.startIndex}-${tableElem.endIndex}] (${t.rows}r × ${t.columns}c) ===`);
-      for (const [ri, row] of (t.tableRows || []).entries()) {
-        for (const [ci, cell] of (row.tableCells || []).entries()) {
-          const text = (cell.content || []).flatMap((e: any) => e.paragraph?.elements || []).map((e: any) => e.textRun?.content || "").join("").trim().substring(0, 40);
-          const contentIndex = cell.content?.[0]?.startIndex;
-          lines.push(`  [r${ri}c${ci}] startIndex:${cell.startIndex} contentIndex:${contentIndex} text:"${text}"`);
-        }
-      }
-      lines.push("");
-    }
-    return { content: [{ type: "text", text: lines.join("\n") }] };
-  }));
 
-  server.tool("insert_doc_tab", "Insert (add) a new tab in a Google Doc. Returns the new tab ID. New tab is appended after existing tabs (Google API does not support specifying position).", {
-    document_id: z.string(),
-    title: z.string().describe("Tab title"),
-    icon_emoji: z.string().optional().describe("Optional emoji icon, e.g. '📋', '✅', '📊'"),
-    parent_tab_id: z.string().optional().describe("Parent tab ID to create a nested (child) tab"),
-  }, withErrorHandler(async ({ document_id, title, icon_emoji, parent_tab_id }) => {
-    const { accessToken } = await getCreds();
-    const tabProperties: Record<string, unknown> = { title };
-    if (icon_emoji) tabProperties.iconEmoji = icon_emoji;
-    if (parent_tab_id) tabProperties.parentTabId = parent_tab_id;
-    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ addDocumentTab: { tabProperties } }]
-    }) as any;
-    const newTab = result.replies?.[0]?.addDocumentTab?.tabProperties;
-    const lines = [`Tab "${title}" created successfully.`];
-    if (newTab?.tabId) lines.push(`Tab ID: ${newTab.tabId}`);
-    if (newTab?.index !== undefined) lines.push(`Index: ${newTab.index}`);
-    if (icon_emoji) lines.push(`Icon: ${icon_emoji}`);
-    if (parent_tab_id) lines.push(`Parent tab: ${parent_tab_id}`);
-    return { content: [{ type: "text", text: lines.join("\n") }] };
-  }));
 
-  server.tool("delete_doc_tab", "Delete a tab from a Google Doc.", {
-    document_id: z.string(),
-    tab_id: z.string().describe("Tab ID to delete"),
-  }, withErrorHandler(async ({ document_id, tab_id }) => {
-    const { accessToken } = await getCreds();
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-      requests: [{ deleteTab: { tabId: tab_id } }]
-    });
-    return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
-  }));
 
   server.tool("update_doc_tab", "Update properties of a Google Doc tab (title and/or emoji icon).", {
     document_id: z.string(),
@@ -667,106 +561,5 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     })
   );
 
-  server.tool("create_bullet_list",
-    "Convert paragraphs in a range to a bulleted or numbered list in a Google Doc.",
-    {
-      document_id: z.string(),
-      start_index: z.number(),
-      end_index: z.number(),
-      list_type: z.enum(["BULLET_DISC_CIRCLE_SQUARE", "NUMBERED_DECIMAL_ALPHA_ROMAN", "BULLET_ARROW3D_CIRCLE_SQUARE", "BULLET_CHECKBOX"]).optional().default("BULLET_DISC_CIRCLE_SQUARE"),
-      tab_id: z.string().optional().describe("Tab ID for multi-tab docs"),
-    },
-    { readOnlyHint: false },
-    withErrorHandler(async ({ document_id, start_index, end_index, list_type = "BULLET_DISC_CIRCLE_SQUARE", tab_id }) => {
-      const { accessToken } = await getCreds();
-      const range: Record<string, unknown> = { startIndex: start_index, endIndex: end_index };
-      if (tab_id) range.tabId = tab_id;
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
-        requests: [{ createParagraphBullets: { range, bulletPreset: list_type } }],
-      });
-      return { content: [{ type: "text", text: `Bullet list (${list_type}) created for range ${start_index}-${end_index}.` }] };
-    })
-  );
 
-  server.tool("insert_multiple_mentions",
-    "Insert multiple @mention smart chips in one batch operation. " +
-    "Each mention is appended as a new line. All chips are real Google smart chips. " +
-    "The tool auto-detects the end of the document — no need to compute indices manually.",
-    {
-      document_id: z.string(),
-      mentions: z.array(z.object({
-        email: z.string(),
-        name: z.string().optional(),
-        prefix_text: z.string().optional(),
-        suffix_text: z.string().optional(),
-      })).describe("List of people to mention. Each gets their own line."),
-      tab_id: z.string().optional().describe("Tab ID to append into. Omit for default tab."),
-    }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, mentions, tab_id }) => {
-      const { accessToken } = await getCreds();
-
-      const invalid = mentions.filter(m => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email));
-      if (invalid.length) {
-        return { content: [{ type: "text", text: `Invalid email(s): ${invalid.map(m => m.email).join(", ")}` }] };
-      }
-
-      const path = tab_id ? "?includeTabsContent=true" : "";
-      const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
-
-      let baseIndex: number;
-      if (tab_id) {
-        function findTab2(tabList: any[], id: string): any | null {
-          for (const tab of tabList) {
-            if (tab.tabProperties?.tabId === id) return tab;
-            if (tab.childTabs?.length) { const f = findTab2(tab.childTabs, id); if (f) return f; }
-          }
-          return null;
-        }
-        const tab = findTab2(doc.tabs || [], tab_id);
-        if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found.` }] };
-        const tabBody = tab.documentTab?.body?.content || [];
-        const lastElem = tabBody[tabBody.length - 1];
-        baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
-      } else {
-        const body = doc.body?.content || [];
-        const lastElem = body[body.length - 1];
-        baseIndex = lastElem?.endIndex ? lastElem.endIndex - 1 : 1;
-      }
-
-      const requests: any[] = [];
-      let offset = 0;
-
-      for (const m of mentions) {
-        const lineStart = baseIndex + offset;
-        const prefix = "\n" + (m.prefix_text || "");
-        const suffix = m.suffix_text || "";
-
-        const prefixLoc: Record<string, unknown> = { index: lineStart };
-        if (tab_id) prefixLoc.tabId = tab_id;
-        requests.push({ insertText: { location: prefixLoc, text: prefix } });
-        offset += prefix.length;
-
-        const chipIdx = baseIndex + offset;
-        const chipLoc: Record<string, unknown> = { index: chipIdx };
-        if (tab_id) chipLoc.tabId = tab_id;
-        const personProperties: Record<string, unknown> = { email: m.email };
-        if (m.name) personProperties.name = m.name;
-        requests.push({ insertPerson: { personProperties, location: chipLoc } });
-        offset += 1;
-
-        if (suffix) {
-          const suffixLoc: Record<string, unknown> = { index: baseIndex + offset };
-          if (tab_id) suffixLoc.tabId = tab_id;
-          requests.push({ insertText: { location: suffixLoc, text: suffix } });
-          offset += suffix.length;
-        }
-      }
-
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
-
-      const summary = mentions.map(m => {
-        const line = [m.prefix_text, `@${m.name || m.email}`, m.suffix_text].filter(Boolean).join(" ");
-        return `  • ${line}`;
-      }).join("\n");
-      return { content: [{ type: "text", text: `${mentions.length} smart chip(s) inserted:\n${summary}` }] };
-    }));
 }
