@@ -149,14 +149,13 @@ async function insertRichElement(
     }
 
     case "footnote": {
-      const body: Record<string, unknown> = { requests: [deleteReq, { insertFootnote: { location: loc } }] };
+      const body: Record<string, unknown> = { requests: [deleteReq, { createFootnote: { location: loc } }] };
       const result = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body) as any;
-      const fnId = result.replies?.find((r: any) => r.insertFootnote)?.insertFootnote?.footnoteId;
+      const fnId = result.replies?.find((r: any) => r.createFootnote)?.createFootnote?.footnoteId;
       if (fnId && el.footnoteContent) {
-        const fnBody: Record<string, unknown> = {
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
           requests: [{ insertText: { location: { segmentId: fnId, index: 0 }, text: el.footnoteContent } }],
-        };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", fnBody);
+        });
       }
       break;
     }
