@@ -109,30 +109,30 @@ async function insertRichElement(
 
     case "mention": {
       if (!el.email) { warnings.push("Mention missing email"); return; }
-      // Step 1: replaceAllText placeholder → unique marker
-      const markerText = `__MNT_${el.email.replace(/[@.]/g, "_")}__`;
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-        requests: [{ replaceAllText: {
-          containsText: { text: el.placeholder, matchCase: true },
-          replaceText: markerText,
-        }}],
-      });
-      // Step 2: re-read to find exact marker index
-      const docM = await docsRequest(accessToken, documentId, "GET", tabId ? "?includeTabsContent=true" : "") as any;
-      const bodyM = tabId ? findTab(docM.tabs, tabId)?.documentTab?.body?.content : docM.body?.content;
-      const dtM = buildDocText(bodyM ?? []);
-      const mPos = dtM.text.indexOf(markerText);
-      if (mPos === -1) { warnings.push(`Mention marker not found for ${el.email}`); return; }
-      const mIdx = dtM.docIndices[mPos] ?? (1 + mPos);
-      const mEnd = mIdx + markerText.length;
-      // Step 3: delete marker + insert chip (email only — no name field)
-      const chipLoc = tabId ? { index: mIdx, tabId } : { index: mIdx };
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-        requests: [
-          { deleteContentRange: { range: tabId ? { startIndex: mIdx, endIndex: mEnd, tabId } : { startIndex: mIdx, endIndex: mEnd } } },
-          { insertPerson: { personProperties: { email: el.email }, location: chipLoc } },
-        ],
-      });
+      // We already have exact doc index from pass2 placeholder lookup.
+      // Step 1: delete placeholder (12 chars: __MNT_NNN__)
+      // Step 2: insert person chip at same index
+      // Both in one batchUpdate — delete happens first, then insert at freed position
+      const phEnd = idx + el.placeholder.length;
+      const chipLoc = tabId ? { index: idx, tabId } : { index: idx };
+      const deleteRange = tabId
+        ? { startIndex: idx, endIndex: phEnd, tabId }
+        : { startIndex: idx, endIndex: phEnd };
+      try {
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [
+            { deleteContentRange: { range: deleteRange } },
+            { insertPerson: { personProperties: { email: el.email }, location: chipLoc } },
+          ],
+        });
+      } catch (err: any) {
+        // If insertPerson fails (e.g. email not resolvable), fall back to @name text
+        const displayName = el.name || el.email;
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [{ insertText: { location: chipLoc, text: `@${displayName}` } }],
+        });
+        warnings.push(`insertPerson failed for ${el.email}, inserted as text: ${err.message}`);
+      }
       break;
     }
 
