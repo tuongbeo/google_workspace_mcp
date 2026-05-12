@@ -109,48 +109,72 @@ async function insertRichElement(
 
     case "mention": {
       if (!el.email) { warnings.push("Mention missing email"); return; }
-      // We already have exact doc index from pass2 placeholder lookup.
-      // Step 1: delete placeholder (12 chars: __MNT_NNN__)
-      // Step 2: insert person chip at same index
-      // Both in one batchUpdate — delete happens first, then insert at freed position
       const phEnd = idx + el.placeholder.length;
       const chipLoc = tabId ? { index: idx, tabId } : { index: idx };
       const deleteRange = tabId
         ? { startIndex: idx, endIndex: phEnd, tabId }
         : { startIndex: idx, endIndex: phEnd };
       try {
-        // Insert chip FIRST at placeholder start — this shifts placeholder right by 1
-        // Then delete the now-shifted placeholder [idx+1, idx+1+phLen)
-        const chipResult = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-          requests: [{ insertPerson: { personProperties: { email: el.email }, location: chipLoc } }],
-        }) as any;
-        // Check if insertPerson reply indicates success (returns personSuggestedChange or similar)
-        const chipReply = chipResult?.replies?.[0];
-        console.log(`[mention] insertPerson reply for ${el.email}:`, JSON.stringify(chipReply));
-        // After insertPerson, placeholder shifted right by 1 char
-        const shiftedRange = tabId
-          ? { startIndex: idx + 1, endIndex: phEnd + 1, tabId }
-          : { startIndex: idx + 1, endIndex: phEnd + 1 };
+        // insertPerson is silently ignored when the target is inside a textRun
+        // that was part of a previous insertText call.
+        //
+        // Fix: insert a temporary "\n" BEFORE the placeholder to create a fresh
+        // paragraph boundary. insertPerson at the START of that fresh paragraph
+        // (which is not inside any textRun) always succeeds.
+        // Then clean up: merge paragraph back by deleting the "\n".
+        //
+        // Steps:
+        //   1. Insert "\n" at idx → placeholder is now at idx+1
+        //   2. insertPerson at idx+1 (start of new paragraph, clean boundary)
+        //   3. Delete placeholder [idx+2, idx+2+phLen)
+        //   4. Delete the "\n" at idx (merge paragraphs back)
+
+        const insertNL = tabId
+          ? { index: idx, tabId }
+          : { index: idx };
         await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-          requests: [{ deleteContentRange: { range: shiftedRange } }],
+          requests: [{ insertText: { location: insertNL, text: "\n" } }],
         });
+
+        // After "\n" insert: placeholder shifted to idx+1, fresh para starts at idx+1
+        const freshLoc = tabId ? { index: idx + 1, tabId } : { index: idx + 1 };
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [{ insertPerson: { personProperties: { email: el.email }, location: freshLoc } }],
+        });
+
+        // Delete placeholder (now at idx+2 because chip took idx+1 and NL is at idx)
+        const phShifted = tabId
+          ? { startIndex: idx + 2, endIndex: idx + 2 + el.placeholder.length, tabId }
+          : { startIndex: idx + 2, endIndex: idx + 2 + el.placeholder.length };
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [{ deleteContentRange: { range: phShifted } }],
+        });
+
+        // Delete the "\n" at idx to merge chip back into original paragraph
+        const nlRange = tabId
+          ? { startIndex: idx, endIndex: idx + 1, tabId }
+          : { startIndex: idx, endIndex: idx + 1 };
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          requests: [{ deleteContentRange: { range: nlRange } }],
+        });
+
       } catch (err: any) {
-        // insertPerson failed — delete placeholder and insert @name text as fallback
+        // Fallback: replace placeholder with @displayName text
         const displayName = el.name || el.email;
         try {
           await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-            requests: [{ deleteContentRange: { range: deleteRange } }],
-          });
-          await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
-            requests: [{ insertText: { location: chipLoc, text: `@${displayName}` } }],
+            requests: [{ replaceAllText: {
+              containsText: { text: el.placeholder, matchCase: true },
+              replaceText: `@${displayName}`,
+            }}],
           });
         } catch (_) {}
-        warnings.push(`insertPerson failed for ${el.email}, inserted as text: ${err.message}`);
+        warnings.push(`insertPerson failed for ${el.email}: ${err.message}`);
       }
       break;
     }
 
-    case "footnote": {
+        case "footnote": {
       const body: Record<string, unknown> = { requests: [deleteReq, { createFootnote: { location: loc } }] };
       const result = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body) as any;
       const fnId = result.replies?.find((r: any) => r.createFootnote)?.createFootnote?.footnoteId;

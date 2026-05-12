@@ -25,9 +25,64 @@ const md = new MarkdownIt({ html: false, linkify: true, typographer: false, brea
 // ── Inline parser ────────────────────────────────────────────────────────────
 
 function parseInlineText(raw: string): InlineNode[] {
-  // We parse inline by walking markdown-it tokens on a mini doc
   const tokens = md.parseInline(raw, {})[0]?.children || [];
   return tokensToInline(tokens);
+}
+
+function tokensToInlineWithMentions(
+  tokens: any[],
+  mentionMap: Map<string, { name: string; email: string }>
+): InlineNode[] {
+  const nodes: InlineNode[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t.type === "text" || t.type === "softbreak" || t.type === "hardbreak") {
+      const content = t.type === "text" ? t.content : "\n";
+      nodes.push(...expandInlineText(content, mentionMap));
+      i++;
+    } else if (t.type === "strong_open") {
+      const children: any[] = [];
+      i++;
+      while (i < tokens.length && tokens[i].type !== "strong_close") { children.push(tokens[i]); i++; }
+      nodes.push({ type: "bold", children: tokensToInlineWithMentions(children, mentionMap) });
+      i++;
+    } else if (t.type === "em_open") {
+      const children: any[] = [];
+      i++;
+      while (i < tokens.length && tokens[i].type !== "em_close") { children.push(tokens[i]); i++; }
+      nodes.push({ type: "italic", children: tokensToInlineWithMentions(children, mentionMap) });
+      i++;
+    } else if (t.type === "s_open" || t.type === "del_open") {
+      const children: any[] = [];
+      i++;
+      while (i < tokens.length && tokens[i].type !== "s_close" && tokens[i].type !== "del_close") { children.push(tokens[i]); i++; }
+      nodes.push({ type: "strikethrough", children: tokensToInlineWithMentions(children, mentionMap) });
+      i++;
+    } else if (t.type === "code_inline") {
+      nodes.push({ type: "code", content: t.content });
+      i++;
+    } else if (t.type === "link_open") {
+      const href = t.attrGet("href") || "";
+      const children: any[] = [];
+      i++;
+      while (i < tokens.length && tokens[i].type !== "link_close") { children.push(tokens[i]); i++; }
+      nodes.push({ type: "link", url: href, children: tokensToInlineWithMentions(children, mentionMap) });
+      i++;
+    } else if (t.type === "image") {
+      const src = t.attrGet("src") || "";
+      let alt = t.content || "";
+      let widthPt: number | undefined;
+      let heightPt: number | undefined;
+      const sizeMatch = IMAGE_SIZE_RE.exec(alt);
+      if (sizeMatch) { alt = sizeMatch[1]; widthPt = Number(sizeMatch[2]); heightPt = Number(sizeMatch[3]); }
+      nodes.push({ type: "image", url: src, alt, widthPt, heightPt });
+      i++;
+    } else {
+      i++;
+    }
+  }
+  return nodes;
 }
 
 function tokensToInline(tokens: any[]): InlineNode[] {
@@ -101,12 +156,12 @@ function tokensToInline(tokens: any[]): InlineNode[] {
 
 /**
  * Expand a raw text string to handle custom inline syntax:
- * @[Name](email) → mention
+ * \u0002MNTn\u0003 → mention (pre-processed sentinel)
  * [^id] → footnote_ref
  */
-function expandInlineText(raw: string): InlineNode[] {
-  // Combined regex for mention and footnote_ref
-  const COMBINED = /@\[([^\]]+)\]\(([^)@\s]+@[^)]+)\)|\[\^([^\]]+)\]/g;
+function expandInlineText(raw: string, mentionMap?: Map<string, { name: string; email: string }>): InlineNode[] {
+  // Regex: sentinel mentions (\x02MNTn\x03) + footnote refs ([^id])
+  const COMBINED = /\x02MNT(\d+)\x03|\[\^([^\]]+)\]/g;
   const nodes: InlineNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
@@ -114,11 +169,17 @@ function expandInlineText(raw: string): InlineNode[] {
   while ((m = COMBINED.exec(raw)) !== null) {
     if (m.index > last) nodes.push({ type: "text", content: raw.slice(last, m.index) });
     if (m[1] !== undefined) {
-      // mention: @[Name](email)
-      nodes.push({ type: "mention", name: m[1], email: m[2] });
+      // mention sentinel \u0002MNTn\u0003
+      const key = m[0];
+      const mentionData = mentionMap?.get(key);
+      if (mentionData) {
+        nodes.push({ type: "mention", name: mentionData.name, email: mentionData.email });
+      } else {
+        nodes.push({ type: "text", content: key });
+      }
     } else {
       // footnote ref: [^id]
-      nodes.push({ type: "footnote_ref", id: m[3] });
+      nodes.push({ type: "footnote_ref", id: m[2] });
     }
     last = m.index + m[0].length;
   }
@@ -132,13 +193,31 @@ export function parseMarkdown(input: string): DocNode[] {
   // Pre-process custom syntax BEFORE feeding to markdown-it
   // Use unique sentinel strings that won't appear in normal text
   // and will survive as standalone paragraph tokens
-  const processed = input
-    .replace(/\\pagebreak/g, "\n\n\u0002PAGEBREAK\u0003\n\n")
-    .replace(/\\toc/g, "\n\n\u0002TOC\u0003\n\n");
+  // Pre-process @[Name](email) → sentinel BEFORE markdown-it
+  // markdown-it parses @[Name](email) as a link — we must intercept first
+  const STX = "\x02"; // ASCII STX (Start of Text) — not valid in normal markdown
+  const ETX = "\x03"; // ASCII ETX (End of Text)
+  const mentionMap = new Map<string, { name: string; email: string }>();
+  let _mIdx = 0;
+  const mentionPre = input.replace(/@\[([^\]]+)\]\(([^)@\s]+@[^)]+)\)/g, (_m, name, email) => {
+    const key = `${STX}MNT${_mIdx++}${ETX}`;
+    mentionMap.set(key, { name: name as string, email: email as string });
+    return key;
+  });
+
+  const processed = mentionPre
+    .replace(/\\pagebreak/g, "\n\n\x02PAGEBREAK\x03\n\n")
+    .replace(/\\toc/g, "\n\n\x02TOC\x03\n\n");
 
   const tokens = md.parse(processed, {});
   const nodes: DocNode[] = [];
   let i = 0;
+
+  // Closure: parse inline text with mentionMap for sentinel resolution
+  function parseInline(raw: string): InlineNode[] {
+    const toks = md.parseInline(raw, {})[0]?.children || [];
+    return tokensToInlineWithMentions(toks, mentionMap);
+  }
 
   // Collect footnote defs — strip them from the processed content
   // [^id]: text at start of line (may be parsed as paragraphs — we intercept below)
@@ -168,15 +247,15 @@ export function parseMarkdown(input: string): DocNode[] {
     // Sentinel detection in inline tokens (the main path with html: false)
     if (t.type === "inline") {
       const c = t.content.trim();
-      if (c === "\u0002PAGEBREAK\u0003") { nodes.push({ type: "page_break" }); i++; continue; }
-      if (c === "\u0002TOC\u0003") { nodes.push({ type: "toc" }); i++; continue; }
+      if (c === "\x02PAGEBREAK\x03") { nodes.push({ type: "page_break" }); i++; continue; }
+      if (c === "\x02TOC\x03") { nodes.push({ type: "toc" }); i++; continue; }
     }
 
     // Headings
     if (t.type === "heading_open") {
       const level = parseInt(t.tag.replace("h", "")) as 1|2|3|4|5|6;
       const inlineToken = tokens[i + 1];
-      const children = inlineToken ? parseInlineText(inlineToken.content) : [];
+      const children = inlineToken ? parseInline(inlineToken.content) : [];
       nodes.push({ type: "heading", level, children });
       i += 3; // heading_open, inline, heading_close
       continue;
@@ -206,7 +285,7 @@ export function parseMarkdown(input: string): DocNode[] {
           if (sizeMatch) { alt = sizeMatch[1]; widthPt = Number(sizeMatch[2]); heightPt = Number(sizeMatch[3]); }
           nodes.push({ type: "image", url: src, alt, widthPt, heightPt });
         } else {
-          const children = parseInlineText(raw);
+          const children = parseInline(raw);
           nodes.push({ type: "paragraph", children });
         }
       }
@@ -241,7 +320,7 @@ export function parseMarkdown(input: string): DocNode[] {
                 isCheckbox = true;
                 raw = cbMatch[2];
               }
-              itemInlines.push(...parseInlineText(raw));
+              itemInlines.push(...parseInline(raw));
             }
             // nested list — simplified: just collect text
             i++;
@@ -270,7 +349,7 @@ export function parseMarkdown(input: string): DocNode[] {
       i++;
       const allText: InlineNode[] = [];
       while (i < tokens.length && tokens[i].type !== "blockquote_close") {
-        if (tokens[i].type === "inline") allText.push(...parseInlineText(tokens[i].content));
+        if (tokens[i].type === "inline") allText.push(...parseInline(tokens[i].content));
         i++;
       }
       nodes.push({ type: "blockquote", children: allText });
