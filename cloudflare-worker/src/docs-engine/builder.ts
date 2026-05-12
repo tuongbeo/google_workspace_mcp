@@ -315,17 +315,19 @@ export function buildExecutionPlan(
       }
 
       case "horizontal_rule": {
-        pass1Requests.push(paraStyleReq(startIdx, paraEnd, tabId,
-          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+        // HR: a paragraph with borderBottom. Range uses endIdx (includes \n char)
+        // namedStyleType reset needed to prevent heading inheritance
         pass1Requests.push(paraStyleReq(startIdx, endIdx, tabId, {
+          namedStyleType: "NORMAL_TEXT",
           borderBottom: {
             color: { color: { rgbColor: { red: 0.7, green: 0.7, blue: 0.7 } } },
             width: { magnitude: 1, unit: "PT" },
-            padding: { magnitude: 3, unit: "PT" },
+            padding: { magnitude: 4, unit: "PT" },
             dashStyle: "SOLID",
           },
+          spaceAbove: { magnitude: 8, unit: "PT" },
           spaceBelow: { magnitude: 8, unit: "PT" },
-        }, "borderBottom,spaceBelow"));
+        }, "namedStyleType,borderBottom,spaceAbove,spaceBelow"));
         break;
       }
 

@@ -350,39 +350,80 @@ async function fillTableCells(
   const body: Record<string, unknown> = { requests: insertReqs.reverse() };
   await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
 
-  // Style header row (bold + theme color)
+  // Style header row: background + bold white text per cell
   const headerRow = tableElem.table.tableRows[0];
   if (headerRow) {
     const styleReqs: object[] = [];
-    for (const cell of headerRow.tableCells ?? []) {
+    for (let ci = 0; ci < nCols; ci++) {
+      const cell = headerRow.tableCells[ci];
+      if (!cell) continue;
       const cellStart = cell.content?.[0]?.startIndex;
-      const cellEnd = cell.content?.slice(-1)[0]?.endIndex;
-      if (cellStart !== undefined && cellEnd !== undefined) {
-        const range = tabId ? { startIndex: cellStart, endIndex: cellEnd, tabId } : { startIndex: cellStart, endIndex: cellEnd };
+      const lastContent = cell.content?.slice(-1)[0];
+      // endIndex of last element in cell (typically the trailing \n paragraph)
+      // Use endIndex - 1 to stay within text content, not include paragraph end
+      const cellEnd = lastContent?.endIndex;
+      if (cellStart === undefined || cellEnd === undefined) continue;
+
+      // Text style: bold + white — apply to all text in cell excluding trailing \n
+      const textRange = tabId
+        ? { startIndex: cellStart, endIndex: cellEnd - 1, tabId }
+        : { startIndex: cellStart, endIndex: cellEnd - 1 };
+      if (cellEnd - 1 > cellStart) {
         styleReqs.push({
           updateTextStyle: {
-            range,
-            textStyle: { bold: true, foregroundColor: { color: { rgbColor: { red: 1, green: 1, blue: 1 } } } },
-            fields: "bold,foregroundColor",
-          },
-        });
-        styleReqs.push({
-          updateTableCellStyle: {
-            tableRange: {
-              tableCellLocation: { tableStartLocation: { index: tableElem.startIndex }, rowIndex: 0, columnIndex: 0 },
-              rowSpan: 1, columnSpan: nCols,
+            range: textRange,
+            textStyle: {
+              bold: true,
+              foregroundColor: { color: { rgbColor: { red: 1, green: 1, blue: 1 } } },
+              weightedFontFamily: { fontFamily: "Arial" },
             },
-            tableCellStyle: { backgroundColor: { color: { rgbColor: { red: 0.24, green: 0.47, blue: 0.78 } } } },
-            fields: "backgroundColor",
+            fields: "bold,foregroundColor,weightedFontFamily",
           },
         });
       }
+
+      // Cell background: blue per cell (not columnSpan — apply individually)
+      styleReqs.push({
+        updateTableCellStyle: {
+          tableRange: {
+            tableCellLocation: {
+              tableStartLocation: { index: tableElem.startIndex },
+              rowIndex: 0,
+              columnIndex: ci,
+            },
+            rowSpan: 1,
+            columnSpan: 1,
+          },
+          tableCellStyle: {
+            backgroundColor: { color: { rgbColor: { red: 0.24, green: 0.47, blue: 0.78 } } },
+            paddingTop: { magnitude: 4, unit: "PT" },
+            paddingBottom: { magnitude: 4, unit: "PT" },
+            paddingLeft: { magnitude: 6, unit: "PT" },
+            paddingRight: { magnitude: 6, unit: "PT" },
+          },
+          fields: "backgroundColor,paddingTop,paddingBottom,paddingLeft,paddingRight",
+        },
+      });
     }
+
+    // Set table to use full page width with even column distribution
+    styleReqs.push({
+      updateTableColumnProperties: {
+        tableStartLocation: { index: tableElem.startIndex },
+        columnIndices: Array.from({ length: nCols }, (_, i) => i),
+        tableColumnProperties: {
+          widthType: "EVENLY_DISTRIBUTED",
+        },
+        fields: "widthType",
+      },
+    });
+
     if (styleReqs.length) {
-      const sb: Record<string, unknown> = { requests: styleReqs };
       try {
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", sb);
-      } catch (_) { /* table style not critical */ }
+        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: styleReqs });
+      } catch (e: any) {
+        // Table style non-critical
+      }
     }
   }
 }
