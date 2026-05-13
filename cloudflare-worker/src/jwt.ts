@@ -117,13 +117,14 @@ async function refreshWithRetry(
   googleClientId: string,
   googleClientSecret: string,
   kv: KVNamespace,
-  retries = 2,
+  retries = 3,  // tăng từ 2 → 3 (tổng 4 attempts)
 ): Promise<StoredTokenRecord> {
   let lastErr: Error = new Error("Unknown error");
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
-      await new Promise(r => setTimeout(r, 1000 * attempt)); // delay 1s, 2s
+      // Exponential backoff: 1s, 2s, 4s (thay vì linear 1s, 2s)
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
     }
 
     const res = await fetch("https://oauth2.googleapis.com/token", {
@@ -224,6 +225,15 @@ export async function getValidAccessToken(
   try {
     const updated = await refreshWithRetry(record, sub, googleClientId, googleClientSecret, kv);
     return updated.access_token;
+  } catch (err) {
+    // Grace period: nếu token mới expired <5 phút, dùng stale thay vì trả 401.
+    // Bảo vệ khỏi transient Google API issues gây disconnect không cần thiết.
+    const staleSecs = now - record.expires_at;
+    if (staleSecs >= 0 && staleSecs < 300) {
+      console.warn(`[TokenManager] Refresh failed, using stale token (${staleSecs}s past expiry) for sub=${sub}. Error: ${err}`);
+      return record.access_token;
+    }
+    throw err;
   } finally {
     // Xóa lock dù thành công hay thất bại
     await kv.delete(lockKey).catch(() => {});
