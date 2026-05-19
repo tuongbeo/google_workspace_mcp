@@ -53,7 +53,8 @@ export async function signJWT(
 
 export async function verifyJWT(
   token: string,
-  secret: string
+  secret: string,
+  graceSeconds = 0,
 ): Promise<Record<string, unknown> | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -73,7 +74,17 @@ export async function verifyJWT(
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < now) return null;
+  if (typeof payload.exp === "number" && payload.exp < now) {
+    // Grace period: Claude.ai may send expired proxy JWTs because its MCP proxy
+    // does not call POST /token to refresh (known Anthropic bug #228).
+    // Accept tokens expired within graceSeconds to keep the connection alive.
+    const staleSecs = now - payload.exp;
+    if (graceSeconds > 0 && staleSecs <= graceSeconds) {
+      console.warn(`[JWT] Accepting expired token (${staleSecs}s past exp) within ${graceSeconds}s grace for sub=${payload.sub}`);
+    } else {
+      return null;
+    }
+  }
 
   return payload;
 }
@@ -123,7 +134,7 @@ async function refreshWithRetry(
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
-      // Exponential backoff: 1s, 2s, 4s (thay vì linear 1s, 2s)
+      // Exponential backoff: 1s, 2s, 4s
       await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
     }
 
@@ -226,8 +237,9 @@ export async function getValidAccessToken(
     const updated = await refreshWithRetry(record, sub, googleClientId, googleClientSecret, kv);
     return updated.access_token;
   } catch (err) {
-    // Grace period: nếu token mới expired <5 phút, dùng stale thay vì trả 401.
-    // Bảo vệ khỏi transient Google API issues gây disconnect không cần thiết.
+    // Grace period: nếu token mới expired <5 phút, dùng stale thay vì throw.
+    // Quan trọng: tránh trả 401 về Claude.ai (gây disconnect toàn bộ connector).
+    // Stale token có thể bị Google API reject, nhưng tool error nhẹ hơn connector disconnect.
     const staleSecs = now - record.expires_at;
     if (staleSecs >= 0 && staleSecs < 300) {
       console.warn(`[TokenManager] Refresh failed, using stale token (${staleSecs}s past expiry) for sub=${sub}. Error: ${err}`);
@@ -242,13 +254,14 @@ export async function getValidAccessToken(
 
 export async function extractSub(
   request: Request,
-  jwtSecret: string
+  jwtSecret: string,
+  graceSeconds = 0,
 ): Promise<string | null> {
   const auth = request.headers.get("Authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "").trim();
   if (!token) return null;
 
-  const payload = await verifyJWT(token, jwtSecret);
+  const payload = await verifyJWT(token, jwtSecret, graceSeconds);
   if (!payload) return null;
 
   return (payload.sub as string) || null;

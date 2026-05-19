@@ -217,8 +217,8 @@ app.all("/mcp", async (c) => {
     });
   }
 
-  // Validate proxy JWT
-  const payload = await verifyJWT(token, env.JWT_SECRET);
+  // Validate proxy JWT — 24h grace period for Claude.ai proxy bug (Anthropic #228)
+  const payload = await verifyJWT(token, env.JWT_SECRET, 86400);
   if (!payload) {
     console.warn(`[route] ${method} /mcp — invalid/expired JWT → 401`);
     return new Response(
