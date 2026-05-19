@@ -49,7 +49,10 @@ function unauthorizedResponse(publicBaseUrl: string): Response {
 }
 
 export async function handleMcpRequest(request: Request, env: Env): Promise<Response> {
-  const sub = await extractSub(request, env.JWT_SECRET);
+  // 24h grace period (86400s) for proxy JWT expiry.
+  // Claude.ai's MCP proxy does NOT refresh tokens (Anthropic bug #228).
+  // Without this, any expired proxy JWT → 401 → full connector disconnect.
+  const sub = await extractSub(request, env.JWT_SECRET, 86400);
   if (!sub) {
     console.warn("[mcp] No valid sub in JWT — returning 401");
     return unauthorizedResponse(env.PUBLIC_BASE_URL);
