@@ -44,6 +44,35 @@ const app = new Hono<HonoEnv>();
 // ── GET /authorize → save Claude.ai's request → redirect to Google ────────────
 
 app.get("/authorize", async (c) => {
+  const url = new URL(c.req.url);
+  const clientId   = url.searchParams.get("client_id")   || "";
+  const redirectUri = url.searchParams.get("redirect_uri") || "";
+
+  // Claude.ai's Advanced Settings sends the Google OAuth client_id directly.
+  // OAuthProvider requires every client_id to be pre-registered in OAUTH_KV.
+  // Auto-register on first authorize if not already present.
+  if (clientId && redirectUri) {
+    const existing = await c.env.OAUTH_KV.get(`client:${clientId}`);
+    if (!existing) {
+      // hashSecret in workers-oauth-provider = SHA-256 hex
+      const secretBytes = new TextEncoder().encode(c.env.GOOGLE_OAUTH_CLIENT_SECRET);
+      const hashBuf = await crypto.subtle.digest("SHA-256", secretBytes);
+      const hashedSecret = Array.from(new Uint8Array(hashBuf))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+
+      await c.env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify({
+        clientId,
+        clientSecret: hashedSecret,
+        redirectUris: [redirectUri],
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+        registrationDate: Math.floor(Date.now() / 1000),
+        tokenEndpointAuthMethod: "client_secret_post",
+      }));
+      console.log(`[auth] auto-registered client ${clientId.slice(-20)}`);
+    }
+  }
+
   const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
   if (!oauthReqInfo.clientId) {
     return c.text("Invalid OAuth request — missing client_id", 400);
