@@ -54,22 +54,18 @@ app.get("/authorize", async (c) => {
   if (clientId && redirectUri) {
     const existing = await c.env.OAUTH_KV.get(`client:${clientId}`);
     if (!existing) {
-      // hashSecret in workers-oauth-provider = SHA-256 hex
-      const secretBytes = new TextEncoder().encode(c.env.GOOGLE_OAUTH_CLIENT_SECRET);
-      const hashBuf = await crypto.subtle.digest("SHA-256", secretBytes);
-      const hashedSecret = Array.from(new Uint8Array(hashBuf))
-        .map(b => b.toString(16).padStart(2, "0")).join("");
-
+      // Register as public client (no clientSecret stored).
+      // Claude.ai uses PKCE (S256) which provides equivalent security for public clients.
+      // We strip client_secret from /token requests in index.ts, so no secret validation needed.
       await c.env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify({
         clientId,
-        clientSecret: hashedSecret,
         redirectUris: [redirectUri],
         grantTypes: ["authorization_code", "refresh_token"],
         responseTypes: ["code"],
         registrationDate: Math.floor(Date.now() / 1000),
-        tokenEndpointAuthMethod: "client_secret_post",
+        tokenEndpointAuthMethod: "none",
       }));
-      console.log(`[auth] auto-registered client ${clientId.slice(-20)}`);
+      console.log(`[auth] auto-registered public client ${clientId.slice(-20)}`);
     }
   }
 

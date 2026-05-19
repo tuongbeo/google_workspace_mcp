@@ -139,6 +139,49 @@ export default {
       return router.fetch(request, env, ctx);
     }
 
+    // /token: strip client_secret before passing to OAuthProvider.
+    // Claude.ai sends the Google OAuth client_secret in Advanced Settings,
+    // but OAuthProvider validates it against a stored hash which may not match.
+    // PKCE (code_verifier) already provides security — client_secret is redundant
+    // when PKCE S256 is used. RFC 7636 §1 explicitly supports this for public clients.
+    if (url.pathname === "/token" && request.method === "POST") {
+      try {
+        const ct = request.headers.get("content-type") || "";
+        let body: Record<string, string> = {};
+        if (ct.includes("application/json")) {
+          body = await request.json() as Record<string, string>;
+        } else {
+          const fd = await request.formData();
+          fd.forEach((v, k) => { body[k] = v.toString(); });
+        }
+
+        const safe = { ...body };
+        if (safe.client_secret) safe.client_secret = `[len=${safe.client_secret.length}]`;
+        if (safe.code) safe.code = `${safe.code.slice(0, 10)}...`;
+        if (safe.refresh_token) safe.refresh_token = `${safe.refresh_token.slice(0, 10)}...`;
+        console.log("[token] request:", JSON.stringify(safe));
+
+        // Strip client_secret: PKCE code_verifier provides equivalent security.
+        // Ensures compatibility regardless of which secret value Claude.ai sends.
+        delete body.client_secret;
+
+        const cleanedBody = new URLSearchParams(body).toString();
+        const cleanedRequest = new Request(request.url, {
+          method: "POST",
+          headers: (() => {
+            const h = new Headers(request.headers);
+            h.set("content-type", "application/x-www-form-urlencoded");
+            return h;
+          })(),
+          body: cleanedBody,
+        });
+        return oauthProvider.fetch(cleanedRequest, env, ctx);
+      } catch (e) {
+        console.error("[token] intercept error:", e);
+        // Fall through to OAuthProvider on parse error
+      }
+    }
+
     // Everything else (OAuth + MCP) handled by OAuthProvider
     return oauthProvider.fetch(request, env, ctx);
   },
