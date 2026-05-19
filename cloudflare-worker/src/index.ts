@@ -156,7 +156,7 @@ app.options("/mcp", (c) => {
     status: 204,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Mcp-Session-Id",
       "Access-Control-Expose-Headers": "Mcp-Session-Id",
       "Access-Control-Max-Age": "86400",
@@ -164,31 +164,71 @@ app.options("/mcp", (c) => {
   });
 });
 
-// BUG-003 FIX: Reject GET /mcp (SSE long-poll) with 405 Method Not Allowed.
+// SSE keep-alive for GET /mcp — replaces BUG-003's 405 response.
 //
-// Root cause of the "connection expired after 10-15 min" issue:
-//   1. Claude.ai periodically sends GET /mcp to establish an SSE long-poll stream
-//      for receiving server-initiated notifications.
-//   2. The MCP transport (enableJsonResponse: true) handles GET by creating a
-//      ReadableStream SSE response that is intended to stay open indefinitely.
-//   3. After transport.handleRequest() returns, transport.close() is called to
-//      clean up Protocol._transport so the next POST request can connect.
-//   4. transport.close() calls cleanup() on all SSE streams, immediately closing
-//      the ReadableStream. Claude.ai receives an SSE connection that opens and
-//      closes instantly.
-//   5. Claude.ai retries GET /mcp repeatedly. After ~10-15 min of failed SSE
-//      attempts, it declares the connection "expired."
+// Background: BUG-003 blocked GET /mcp with 405 to prevent the "SSE stream
+// opens then immediately closes" issue caused by per-request McpServer.close().
+// However, Claude.ai's MCP proxy uses GET /mcp SSE as a keep-alive signal.
+// Without it, the proxy's internal session timer fires and disconnects.
+// Jira/Confluence servers allow GET /mcp → SSE → no disconnect.
 //
-// Fix: Return 405 for GET /mcp. Per MCP Streamable HTTP spec §6.3.2, servers
-// that do not support persistent SSE SHOULD respond with 405. Claude.ai will
-// fall back to pure stateless POST mode with no SSE dependency.
-app.get("/mcp", (c) => new Response(null, {
-  status: 405,
-  headers: {
-    "Allow": "POST, OPTIONS",
-    "Access-Control-Allow-Origin": "*",
-  },
-}));
+// Fix: Return a lightweight SSE stream that stays open WITHOUT going through
+// the per-request McpServer. This is just a heartbeat — no MCP messages flow
+// over it. The stream remains open until the client disconnects.
+app.get("/mcp", async (c) => {
+  const auth = c.req.header("Authorization") || "";
+  const token = auth.replace(/^Bearer\s+/i, "").trim();
+
+  if (!token) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": [
+          `Bearer realm="${c.env.PUBLIC_BASE_URL}"`,
+          `resource_metadata_url="${c.env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
+        ].join(", "),
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  const payload = await verifyJWT(token, c.env.JWT_SECRET, 86400);
+  if (!payload) {
+    return new Response(JSON.stringify({ error: "invalid_token" }), {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": `Bearer realm="${c.env.PUBLIC_BASE_URL}", error="invalid_token"`,
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  console.log(`[route] GET /mcp — SSE keep-alive opened for sub=${payload.sub}`);
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      // Initial comment to confirm connection is alive
+      controller.enqueue(encoder.encode(":ok\n\n"));
+    },
+    cancel() {
+      console.log(`[route] GET /mcp — SSE keep-alive closed by client for sub=${payload.sub}`);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "Mcp-Session-Id",
+    },
+  });
+});
 
 // Also reject DELETE /mcp — session termination is not needed in stateless mode.
 app.delete("/mcp", (c) => new Response(null, {
