@@ -2,19 +2,28 @@
  * Types for Google Workspace MCP Cloudflare Worker
  */
 
+// Props injected into McpAgent by OAuthProvider after Google auth completes.
+// Available as `this.props` inside GoogleWorkspaceAgent.
+export interface OAuthProps {
+  google_sub: string;  // Stable Google user ID (userinfo.sub)
+  email:      string;  // Google account email
+}
+
 export interface Env {
-  // ─── Google OAuth 2.0 (fallback — per-connector credentials take priority) ────
-  GOOGLE_OAUTH_CLIENT_ID?:     string;
-  GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  // ─── Google OAuth 2.0 credentials ─────────────────────────────────────────────
+  GOOGLE_OAUTH_CLIENT_ID:     string;
+  GOOGLE_OAUTH_CLIENT_SECRET: string;
 
   // ─── Worker config ─────────────────────────────────────────────────────────────
   PUBLIC_BASE_URL: string;
-  JWT_SECRET:      string;
 
   // ─── Cloudflare KV ─────────────────────────────────────────────────────────────
-  OAUTH_KV:  KVNamespace;  // OAuth state, pending_jwt, DCR client records
-  TOKENS_KV: KVNamespace;  // Google access/refresh tokens (sensitive)
+  OAUTH_KV:  KVNamespace;  // OAuth state (from OAuthProvider)
+  TOKENS_KV: KVNamespace;  // Google access/refresh tokens
   CONFIG_KV: KVNamespace;  // Feature flags, config (optional)
+
+  // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
+  GW_SERVER: DurableObjectNamespace;
 
   // ─── Google Custom Search (optional) ───────────────────────────────────────────
   GOOGLE_PSE_API_KEY?:    string;
