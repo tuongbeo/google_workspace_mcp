@@ -336,6 +336,7 @@ async function pass3(
   if (reqs2.length > 0) await bu(at, spreadsheetId, reqs2);
 
   // section_headers — insert descending to avoid index drift
+  let insertedSectionCount = 0;
   if (opts.section_headers?.length && nRows > 0) {
     const sorted = [...opts.section_headers].sort((a, b) => b.before_row - a.before_row);
     for (const sh of sorted) {
@@ -357,19 +358,21 @@ async function pass3(
       await sheetsRequest(at, spreadsheetId,
         `/values/${encodeURIComponent(lRange)}?valueInputOption=RAW`, "PUT",
         { range: lRange, values: [[sh.label]] });
+      insertedSectionCount++;
     }
   }
 
-  // summary_row
+  // summary_row — sri must account for inserted section header rows
   if (opts.summary_row && nRows > 0) {
-    const sri = nRows + 1;
+    const sri = nRows + 1 + insertedSectionCount;
+    const dataEndRow = nRows + insertedSectionCount + 1; // last data row after section inserts
     const sVals = parsed.headers.map((_, i) => {
       const t = (colCfgs[i]?.type ?? columns[i]?.type) as ColumnType;
       const cA1 = colLetter(i);
-      if (["currency","integer","decimal"].includes(t)) return `=SUM(${cA1}2:${cA1}${nRows + 1})`;
-      if (t === "percent") return `=AVERAGE(${cA1}2:${cA1}${nRows + 1})`;
+      if (["currency","integer","decimal"].includes(t)) return `=SUM(${cA1}2:${cA1}${dataEndRow})`;
+      if (t === "percent") return `=AVERAGE(${cA1}2:${cA1}${dataEndRow})`;
       if (i === 0) return "Total";
-      return `=COUNTA(${cA1}2:${cA1}${nRows + 1})`;
+      return `=COUNTA(${cA1}2:${cA1}${dataEndRow})`;
     });
     const sRange = `${sheetName}!A${sri + 1}:${colLetter(parsed.headers.length - 1)}${sri + 1}`;
     await sheetsRequest(at, spreadsheetId,
