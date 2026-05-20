@@ -9,8 +9,7 @@
  *   GET  /authorize                              → OAuth authorize (redirect sang Google)
  *   GET  /callback                               → OAuth callback từ Google
  *   POST /token                                  → Exchange auth code → proxy JWT
- *   POST /mcp                                    → MCP Streamable HTTP endpoint (stateless)
- *   GET  /mcp                                    → 405 (SSE not supported in stateless mode)
+ *   ALL  /mcp                                    → MCP Streamable HTTP (GET+POST, stateless)
  */
 
 import { Hono } from "hono";
@@ -147,93 +146,27 @@ app.get("/authorize", async (c) => handleAuthorize(c.req.raw, c.env));
 app.get("/callback", async (c) => handleCallback(c.req.raw, c.env));
 app.post("/token", async (c) => handleToken(c.req.raw, c.env));
 
-// ── MCP Endpoint (Streamable HTTP — stateless) ────────────────────────────────
-
-// BUG-002 FIX: Handle OPTIONS preflight BEFORE auth check.
-// Without this, browser-based MCP clients receive 401 on preflight and abort.
-app.options("/mcp", (c) => {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Mcp-Session-Id",
-      "Access-Control-Expose-Headers": "Mcp-Session-Id",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
-});
-
-// SSE keep-alive for GET /mcp — replaces BUG-003's 405 response.
+// ── MCP Endpoint — ALL methods (GET + POST), no fake SSE, no server.close() ──
 //
-// Background: BUG-003 blocked GET /mcp with 405 to prevent the "SSE stream
-// opens then immediately closes" issue caused by per-request McpServer.close().
-// However, Claude.ai's MCP proxy uses GET /mcp SSE as a keep-alive signal.
-// Without it, the proxy's internal session timer fires and disconnects.
-// Jira/Confluence servers allow GET /mcp → SSE → no disconnect.
+// Pattern copied directly from Jira/Confluence workers which have zero disconnect issues.
+// Key insight: app.all() lets the SDK transport handle both GET and POST natively.
+// GET /mcp → transport returns SSE stream that stays open (client disconnects it)
+// POST /mcp → transport returns JSON response
+// Do NOT split into separate app.get + app.post — the GET handler must go through
+// the same transport.handleRequest() path so the SDK can manage the SSE lifecycle.
 //
-// Fix: Return a lightweight SSE stream that stays open WITHOUT going through
-// the per-request McpServer. This is just a heartbeat — no MCP messages flow
-// over it. The stream remains open until the client disconnects.
-app.get("/mcp", async (c) => {
-  const auth = c.req.header("Authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "").trim();
-
-  if (!token) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: {
-        "Content-Type": "application/json",
-        "WWW-Authenticate": [
-          `Bearer realm="${c.env.PUBLIC_BASE_URL}"`,
-          `resource_metadata_url="${c.env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
-        ].join(", "),
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  }
-
-  const payload = await verifyJWT(token, c.env.JWT_SECRET, 86400);
-  if (!payload) {
-    return new Response(JSON.stringify({ error: "invalid_token" }), {
-      status: 401,
-      headers: {
-        "Content-Type": "application/json",
-        "WWW-Authenticate": `Bearer realm="${c.env.PUBLIC_BASE_URL}", error="invalid_token"`,
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  }
-
-  console.log(`[route] GET /mcp — SSE keep-alive opened for sub=${payload.sub}`);
-
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      // Initial comment to confirm connection is alive
-      controller.enqueue(encoder.encode(":ok\n\n"));
-    },
-    cancel() {
-      console.log(`[route] GET /mcp — SSE keep-alive closed by client for sub=${payload.sub}`);
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Expose-Headers": "Mcp-Session-Id",
-    },
-  });
-});
-
-// Also reject DELETE /mcp — session termination is not needed in stateless mode.
-app.delete("/mcp", (c) => new Response(null, {
-  status: 405,
-  headers: { "Allow": "POST, OPTIONS" },
+// server.close() is NOT called (see mcp-agent.ts comment). This was the primary
+// cause of disconnects: close() cancelled the ReadableStream before Cloudflare
+// flushed it, causing Claude.ai to see a terminated SSE connection.
+app.options("/mcp", (c) => new Response(null, {
+  status: 204,
+  headers: {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, Mcp-Session-Id",
+    "Access-Control-Expose-Headers": "Mcp-Session-Id",
+    "Access-Control-Max-Age": "86400",
+  },
 }));
 
 app.all("/mcp", async (c) => {
@@ -242,7 +175,6 @@ app.all("/mcp", async (c) => {
   const auth = c.req.header("Authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "").trim();
 
-  // Không có token → 401 kèm WWW-Authenticate để Claude.ai trigger OAuth discovery
   if (!token) {
     console.log(`[route] ${method} /mcp — no token → 401`);
     return new Response(JSON.stringify({ error: "unauthorized" }), {
@@ -253,34 +185,29 @@ app.all("/mcp", async (c) => {
           `Bearer realm="${env.PUBLIC_BASE_URL}"`,
           `resource_metadata_url="${env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
         ].join(", "),
+        "Access-Control-Allow-Origin": "*",
       },
     });
   }
 
-  // Validate proxy JWT — 24h grace period for Claude.ai proxy bug (Anthropic #228)
+  // 24h grace period: Claude.ai proxy does not refresh expired proxy JWTs
   const payload = await verifyJWT(token, env.JWT_SECRET, 86400);
   if (!payload) {
-    console.warn(`[route] ${method} /mcp — invalid/expired JWT → 401`);
-    return new Response(
-      JSON.stringify({
-        error: "invalid_token",
-        error_description: "Token is invalid or expired. Please re-authorize.",
-      }),
-      {
-        status: 401,
-        headers: {
-          "Content-Type": "application/json",
-          "WWW-Authenticate": [
-            `Bearer realm="${env.PUBLIC_BASE_URL}"`,
-            `error="invalid_token"`,
-            `resource_metadata_url="${env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
-          ].join(", "),
-        },
-      }
-    );
+    console.warn(`[route] ${method} /mcp — JWT invalid/expired → 401`);
+    return new Response(JSON.stringify({ error: "invalid_token" }), {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": [
+          `Bearer realm="${env.PUBLIC_BASE_URL}"`,
+          `error="invalid_token"`,
+          `resource_metadata_url="${env.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource"`,
+        ].join(", "),
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
   }
 
-  // Delegate sang MCP handler
   return handleMcpRequest(c.req.raw, env);
 });
 
