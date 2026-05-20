@@ -67,7 +67,8 @@ export function detectColumnType(header: string, values: (string | number | bool
     if (nums.every(n => n >= 0 && n <= 1)) return "percent";
     return sv.every(v => isIntStr(v)) ? "integer" : "decimal";
   }
-  if (new Set(sv).size <= 8) return "status";
+  // Status: ≤8 unique values AND all values are short strings (max 40 chars)
+  if (new Set(sv).size <= 8 && sv.every(v => v.length <= 40)) return "status";
   return "text";
 }
 
