@@ -480,7 +480,7 @@ export async function executeWriteSheet(
   const isCreate = !input.spreadsheet_id;
   const sheetsList: SheetData[] = input.sheets?.length
     ? input.sheets
-    : [{ name: input.sheet_name ?? "Sheet1", ...input } as SheetData];
+    : [{ ...input, name: input.sheet_name ?? "Sheet1" } as SheetData];
 
   let spreadsheetId: string;
   let createdSheets: any[];
