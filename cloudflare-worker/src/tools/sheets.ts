@@ -88,7 +88,10 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Appended ${data.updates?.updatedRows || "?"} rows.` }] };
   }));
 
-  server.tool("create_spreadsheet", "Create a new Google Spreadsheet.", {
+  server.tool("create_spreadsheet",
+    "[DEPRECATED — use write_google_sheet] Create a blank Google Spreadsheet. " +
+    "Superseded by write_google_sheet which creates AND populates AND formats in a single call. This tool remains functional.",
+    {
     title: z.string(),
     sheet_names: z.array(z.string()).optional(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ title, sheet_names }) => {
@@ -158,9 +161,9 @@ export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
   }));
 
   server.tool("create_formatted_spreadsheet",
-    "Create a new Google Spreadsheet with professional formatting in one call. " +
-    "Applies Anthropic XLSX standards: bold colored header row, alternating data rows, " +
-    "cell borders, frozen row 1, auto-resize columns, and optional financial number formats.",
+    "[DEPRECATED — use write_google_sheet] Create a styled spreadsheet from data. " +
+    "Superseded by write_google_sheet which supports all 6 themes, column type auto-detection, " +
+    "smartchips, charts, and more. This tool remains functional.",
     {
       title: z.string().describe("Spreadsheet title"),
       sheets: z.array(z.object({

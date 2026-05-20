@@ -22,5 +22,14 @@
       "binding": "CONFIG_KV",
       "id": "78cc72f93f34486dab1ff1a3fd5ecd81"
     }
+  ],
+
+  // Migration: delete GoogleWorkspaceAgent DO class (v3 -> v2 rollback)
+  // This removes the DO dependency so the worker can deploy without DO exports
+  "migrations": [
+    {
+      "tag": "v3-to-v2-remove-do",
+      "deleted_classes": ["GoogleWorkspaceAgent"]
+    }
   ]
 }
