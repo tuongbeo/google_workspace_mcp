@@ -51,7 +51,7 @@ export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsF
       spreadsheet_id: z.string(),
       sheet_id:       z.number().int().optional().describe("Sheet ID (0 = first sheet). Required for create."),
       chart_id:       z.number().int().optional().describe("Existing chart ID. Required for update/delete."),
-      chart_type:     z.enum(["BAR","LINE","PIE","COLUMN","AREA","SCATTER"]).optional(),
+      chart_type:     z.enum(["BAR","LINE","PIE","COLUMN","AREA","SCATTER","TIMELINE"]).optional(),
       source_range:   z.string().optional().describe("A1 notation, e.g. 'Sheet1!A1:C10'"),
       title:          z.string().optional(),
       position: z.object({
@@ -93,6 +93,16 @@ export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsF
             legendPosition: legend_position || "RIGHT_LEGEND",
             domain: { sourceRange: { sources: [domainRange] } },
             series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: gridRange.startColumnIndex + 1 }] } },
+          };
+        } else if (chart_type === "TIMELINE") {
+          spec.basicChart = {
+            chartType: "TIMELINE",
+            headerCount: 1,
+            axis: [{ position: "BOTTOM_AXIS" }, { position: "LEFT_AXIS" }],
+            domains: [{ domain: { sourceRange: { sources: [domainRange] } } }],
+            series: [{
+              series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: gridRange.startColumnIndex + 1 }] } },
+            }],
           };
         } else {
           // Build one series per column beyond domain
@@ -410,7 +420,8 @@ export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsF
   // ── add_protected_range ─────────────────────────────────────────────────────
 
   server.tool("add_protected_range",
-    "Protect a range or sheet in Google Sheets. Warning-only mode shows a warning but allows edits; strict mode blocks non-editors.",
+    "[DEPRECATED — use batch_update_spreadsheet] Protect a range or sheet in Google Sheets. " +
+    "Use batch_update_spreadsheet with an addProtectedRange request. This tool remains functional.",
     {
       spreadsheet_id: z.string(),
       sheet_id:       z.number().int().default(0),
