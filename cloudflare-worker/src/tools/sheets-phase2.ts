@@ -98,10 +98,7 @@ export function registerSheetsPhase2Tools(server: McpServer, getCreds: GetCredsF
           spec.basicChart = {
             chartType: "TIMELINE",
             headerCount: 1,
-<<<<<<< HEAD
             axis: [{ position: "BOTTOM_AXIS" }, { position: "LEFT_AXIS" }],
-=======
->>>>>>> ae99365fc858c6dca0a7eafa6bd540cd59622958
             domains: [{ domain: { sourceRange: { sources: [domainRange] } } }],
             series: [{
               series: { sourceRange: { sources: [{ ...gridRange, startColumnIndex: gridRange.startColumnIndex + 1 }] } },
