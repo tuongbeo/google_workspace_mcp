@@ -57,7 +57,7 @@ const TOOL_REGISTRY: string[] = [
   // Docs — tabs & comments
   "add_document_comment", "get_doc_tab_content", "get_doc_tabs",
   "list_document_comments", "manage_doc_comments", "manage_doc_suggestions", "manage_doc_tabs",
-  "reply_to_document_comment", "write_google_doc",
+  "reply_to_document_comment", "write_google_doc", "write_google_sheet",
   // Docs — advanced
   "accept_suggestion", "create_named_range", "create_table", "create_table_with_data",
   "delete_named_range", "delete_paragraph_bullets", "get_doc_metadata", "get_doc_suggestions",
