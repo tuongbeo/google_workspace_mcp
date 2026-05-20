@@ -125,7 +125,7 @@ async function pass2(
 // ── PASS 3 ───────────────────────────────────────────────────────────────────
 
 async function pass3(
-  at: string, spreadsheetId: string, sheetId: number,
+  at: string, spreadsheetId: string, sheetId: number, sheetName: string,
   parsed: ParsedSheet, colCfgs: Record<number, ColumnConfig>,
   opts: {
     theme: ThemeName; alternating_rows: boolean; freeze_rows: number; freeze_cols?: number;
@@ -353,7 +353,7 @@ async function pass3(
         }},
         fields: "userEnteredFormat(backgroundColor,textFormat)",
       }}]);
-      const lRange = `A${insertAt + 1}`;
+      const lRange = `${sheetName}!A${insertAt + 1}`;
       await sheetsRequest(at, spreadsheetId,
         `/values/${encodeURIComponent(lRange)}?valueInputOption=RAW`, "PUT",
         { range: lRange, values: [[sh.label]] });
@@ -371,7 +371,7 @@ async function pass3(
       if (i === 0) return "Total";
       return `=COUNTA(${cA1}2:${cA1}${nRows + 1})`;
     });
-    const sRange = `A${sri + 1}:${colLetter(parsed.headers.length - 1)}${sri + 1}`;
+    const sRange = `${sheetName}!A${sri + 1}:${colLetter(parsed.headers.length - 1)}${sri + 1}`;
     await sheetsRequest(at, spreadsheetId,
       `/values/${encodeURIComponent(sRange)}?valueInputOption=USER_ENTERED`, "PUT",
       { range: sRange, values: [sVals] });
@@ -457,7 +457,7 @@ async function processSheet(
   const parsed = parseInput(data, colCfgs);
   const theme = (data.theme ?? "corporate") as ThemeName;
   await pass2(at, spreadsheetId, sheetId, sheetName, parsed, colCfgs, data.position ?? "replace");
-  await pass3(at, spreadsheetId, sheetId, parsed, colCfgs, {
+  await pass3(at, spreadsheetId, sheetId, sheetName, parsed, colCfgs, {
     theme, alternating_rows: data.alternating_rows ?? true,
     freeze_rows: data.freeze_rows ?? 1, freeze_cols: data.freeze_cols,
     auto_resize_columns: data.auto_resize_columns ?? true,
