@@ -1,0 +1,40 @@
+{
+  "name": "plan",
+  "main": "src/workers/plan.ts",
+  "compatibility_date": "2025-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // ── KV Namespaces (shared with workspace worker) ───────────────────────────
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "e51d896daf1f46019c04627a38beac8b"
+    },
+    {
+      "binding": "TOKENS_KV",
+      "id": "f57a70d271024b669640803bd4a9a2a1"
+    },
+    {
+      "binding": "CONFIG_KV",
+      "id": "78cc72f93f34486dab1ff1a3fd5ecd81"
+    }
+  ],
+
+  // ── Durable Object (PlanAgent) ────────────────────────────────────────────
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_SERVER",
+        "class_name": "PlanAgent"
+      }
+    ]
+  },
+
+  // ── DO Migration ──────────────────────────────────────────────────────────
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PlanAgent"]
+    }
+  ]
+}

@@ -6,6 +6,199 @@
  * Pass 2 — Write data + number formats + smartchips
  * Pass 3 — Visual styling (banding, header, freeze, alignment, conditional)
  * Pass 4 — Rich elements (charts, overlay images)
+ */
+
+import { googleFetch, sheetsRequest } from "../google";
+import { THEMES, FONT_PAIRS, deriveSheetTokens, hexToSheetsRgb } from "../styles";
+import { parseInput, buildNumberFormat } from "./parser";
+import { buildPersonChipCell, buildFileChipCell, isEmail, isDriveUrl } from "./chipRuns";
+import {
+  WriteSheetInput, SheetData, ParsedSheet, ParsedColumn,
+  ColumnConfig, ColumnType, ChartConfig, ThemeName,
+} from "./types";
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+function rgb(hex: string) { return hexToSheetsRgb(hex); }
+
+function gr(sheetId: number, r0: number, r1: number, c0: number, c1: number) {
+  return { sheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: c0, endColumnIndex: c1 };
+}
+
+function colLetter(n: number): string {
+  return n < 26
+    ? String.fromCharCode(65 + n)
+    : String.fromCharCode(64 + Math.floor(n / 26)) + String.fromCharCode(65 + (n % 26));
+}
+
+function parseAnchorCell(cell: string): { rowIndex: number; columnIndex: number } {
+  const m = cell.match(/^([A-Z]+)(\d+)$/i);
+  if (!m) return { rowIndex: 0, columnIndex: 0 };
+  const col = m[1].toUpperCase().split("")
+    .reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0) - 1;
+  return { rowIndex: parseInt(m[2]) - 1, columnIndex: col };
+}
+
+function parseA1Range(a1: string, sheetId: number) {
+  const cellPart = a1.includes("!") ? a1.split("!")[1] : a1;
+  const m = cellPart.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+  if (!m) return gr(sheetId, 0, 0, 0, 0);
+  const ci = (col: string) =>
+    col.toUpperCase().split("").reduce((acc, c) => acc * 26 + c.charCodeAt(0) - 64, 0) - 1;
+  return {
+    sheetId,
+    startRowIndex: parseInt(m[2]) - 1,
+    endRowIndex: parseInt(m[4]),
+    startColumnIndex: ci(m[1]),
+    endColumnIndex: ci(m[3]) + 1,
+  };
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  green: "#d1fae5", amber: "#fef3c7", red: "#fee2e2",
+  blue: "#dbeafe", gray: "#f3f4f6",
+};
+
+async function batchUpdate(accessToken: string, spreadsheetId: string, requests: unknown[]) {
+  return sheetsRequest(accessToken, spreadsheetId, ":batchUpdate", "POST", { requests });
+}
+
+// ─── PASS 2: data write ───────────────────────────────────────────────────────
+
+async function pass2DataWrite(
+  accessToken: string,
+  spreadsheetId: string,
+  sheetId: number,
+  sheetName: string,
+  parsed: ParsedSheet,
+  colConfigs: Record<number, ColumnConfig>,
+  position: "replace" | "append",
+): Promise<void> {
+  const { headers, rows, columns } = parsed;
+  const numCols = headers.length;
+  const numRows = rows.length;
+
+  // Columns needing chip treatment (written separately via updateCells)
+  const chipCols = new Set<number>();
+  for (const col of columns) {
+    const t = colConfigs[col.index]?.type ?? col.type;
+    if (t === "people_chip" || t === "file_chip") chipCols.add(col.index);
+  }
+
+  // Build values array for values endpoint
+  const writeValues: any[][] = [headers];
+  for (const row of rows) {
+    const cells: any[] = row.map((v, ci) => {
+      if (v === null) return "";
+      const type = (colConfigs[ci]?.type ?? columns[ci]?.type) as ColumnType;
+      if (type === "image_formula" && typeof v === "string"
+          && /\.(png|jpg|jpeg|gif|svg|webp)/i.test(v)) {
+        return `=IMAGE("${v}",1)`;
+      }
+      if (chipCols.has(ci)) return String(v); // placeholder, replaced by updateCells below
+      return v;
+    });
+    writeValues.push(cells);
+  }
+
+  if (position === "replace") {
+    const range = `${sheetName}!A1:${colLetter(numCols - 1)}${writeValues.length}`;
+    await sheetsRequest(accessToken, spreadsheetId,
+      `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
+      "PUT", { range, majorDimension: "ROWS", values: writeValues });
+  } else {
+    const range = `${sheetName}!A1`;
+    await sheetsRequest(accessToken, spreadsheetId,
+      `/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      "POST", { range, majorDimension: "ROWS", values: writeValues });
+  }
+
+  // Format requests: number formats, boolean validation, column widths
+  const fmtReqs: any[] = [];
+  for (const col of columns) {
+    const cfg = colConfigs[col.index];
+    const type = cfg?.type ?? col.type;
+    const fmt = buildNumberFormat(type, cfg?.format);
+    if (fmt && numRows > 0) {
+      fmtReqs.push({
+        repeatCell: {
+          range: gr(sheetId, 1, numRows + 1, col.index, col.index + 1),
+          cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: fmt } } },
+          fields: "userEnteredFormat.numberFormat",
+        },
+      });
+    }
+    if (type === "boolean" && numRows > 0) {
+      fmtReqs.push({
+        setDataValidation: {
+          range: gr(sheetId, 1, numRows + 1, col.index, col.index + 1),
+          rule: { condition: { type: "BOOLEAN" }, strict: false, showCustomUi: true },
+        },
+      });
+    }
+    if (cfg?.width) {
+      fmtReqs.push({
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: col.index, endIndex: col.index + 1 },
+          properties: { pixelSize: cfg.width },
+          fields: "pixelSize",
+        },
+      });
+    }
+  }
+
+  // Smart chip cells via updateCells
+  for (const ci of chipCols) {
+    const col = columns[ci];
+    const type = (colConfigs[ci]?.type ?? col?.type) as ColumnType;
+    const cellData: any[] = [];
+    for (let ri = 0; ri < rows.length; ri++) {
+      const v = rows[ri][ci];
+      if (!v && v !== 0) { cellData.push({}); continue; }
+      const str = String(v);
+      if (type === "people_chip" && isEmail(str)) {
+        cellData.push(buildPersonChipCell(str));
+      } else if (type === "file_chip" && isDriveUrl(str)) {
+        cellData.push(buildFileChipCell(str));
+      } else {
+        cellData.push({ userEnteredValue: { stringValue: str } });
+      }
+    }
+    if (cellData.length > 0) {
+      fmtReqs.push({
+        updateCells: {
+          rows: cellData.map(cd => ({ values: [cd] })),
+          fields: "userEnteredValue,chipRuns",
+          start: { sheetId, rowIndex: 1, columnIndex: ci },
+        },
+      });
+    }
+  }
+
+  if (fmtReqs.length > 0) await batchUpdate(accessToken, spreadsheetId, fmtReqs);
+}
+
+// ─── PASS 3: visual styling ───────────────────────────────────────────────────
+
+async function pass3Styling(
+  accessToken: string,
+  spreadsheetId: string,
+  sheetId: number,
+  sheetName: string,
+  parsed: ParsedSheet,
+  colConfigs: Record<number, ColumnConfig>,
+  opts: {
+    theme: ThemeName;
+    alternating_rows: boolean;
+    freeze_rows: number;
+    freeze_cols?: number;
+    auto_resize_columns: boolean;
+    column_groups?: import("./types").ColumnGroup[];
+    section_headers?: import("./types").SectionHeader[];
+    total_rows?: number[];
+    summary_row?: boolean;
+    conditional_highlight?: { negative_red?: boolean; max_green?: boolean };
+    conditional_rules?: Array<{ range: string; condition: object; format: object }>;
   },
 ): Promise<void> {
   const { headers, rows, columns } = parsed;
@@ -13,6 +206,82 @@
   const nRows = rows.length;
   const totalRows = nRows + (opts.summary_row ? 1 : 0);
 
+  const themeKey: ThemeName = (opts.theme in THEMES ? opts.theme : "corporate") as ThemeName;
+  const kc = THEMES[themeKey];
+  const tok = deriveSheetTokens(kc, FONT_PAIRS.arial_roboto);
+  const reqs: any[] = [];
+
+  // Header row
+  reqs.push({
+    repeatCell: {
+      range: gr(sheetId, 0, 1, 0, nCols),
+      cell: {
+        userEnteredFormat: {
+          backgroundColor: rgb(tok.headerBg),
+          textFormat: { foregroundColor: rgb(tok.headerText), bold: true,
+            fontSize: tok.headerFontSize, fontFamily: tok.fontFamily },
+          horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE", wrapStrategy: "WRAP",
+        },
+      },
+      fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+    },
+  });
+
+  // Body font
+  if (nRows > 0) {
+    reqs.push({
+      repeatCell: {
+        range: gr(sheetId, 1, totalRows + 1, 0, nCols),
+        cell: {
+          userEnteredFormat: {
+            textFormat: { fontFamily: tok.fontFamily, fontSize: tok.bodyFontSize },
+            verticalAlignment: "MIDDLE",
+          },
+        },
+        fields: "userEnteredFormat.textFormat.fontFamily,userEnteredFormat.textFormat.fontSize,userEnteredFormat.verticalAlignment",
+      },
+    });
+  }
+
+  // Column alignment
+  for (const col of columns) {
+    const cfg = colConfigs[col.index];
+    const type = (cfg?.type ?? col.type) as ColumnType;
+    if (cfg?.align && nRows > 0) {
+      const m: Record<string, string> = { left: "LEFT", center: "CENTER", right: "RIGHT" };
+      reqs.push({
+        repeatCell: {
+          range: gr(sheetId, 1, nRows + 1, col.index, col.index + 1),
+          cell: { userEnteredFormat: { horizontalAlignment: m[cfg.align] ?? "LEFT" } },
+          fields: "userEnteredFormat.horizontalAlignment",
+        },
+      });
+    } else if (!cfg?.align && ["currency","percent","integer","decimal"].includes(type) && nRows > 0) {
+      reqs.push({
+        repeatCell: {
+          range: gr(sheetId, 1, nRows + 1, col.index, col.index + 1),
+          cell: { userEnteredFormat: { horizontalAlignment: "RIGHT" } },
+          fields: "userEnteredFormat.horizontalAlignment",
+        },
+      });
+    }
+    if (cfg?.valign && nRows > 0) {
+      const m: Record<string, string> = { top: "TOP", middle: "MIDDLE", bottom: "BOTTOM" };
+      reqs.push({
+        repeatCell: {
+          range: gr(sheetId, 1, nRows + 1, col.index, col.index + 1),
+          cell: { userEnteredFormat: { verticalAlignment: m[cfg.valign] ?? "MIDDLE" } },
+          fields: "userEnteredFormat.verticalAlignment",
+        },
+      });
+    }
+  }
+
+  // Alternating rows via addBanding
+  if (opts.alternating_rows && nRows > 0) {
+    try {
+      const info = await sheetsRequest(accessToken, spreadsheetId,
+        "?fields=sheets(properties.sheetId,bandedRanges)") as any;
       const sheet = (info.sheets || []).find((s: any) => s.properties?.sheetId === sheetId);
       for (const br of (sheet?.bandedRanges || [])) {
         if (br.bandedRangeId) reqs.push({ deleteBanding: { bandedRangeId: br.bandedRangeId } });
@@ -214,6 +483,7 @@
   if (reqs2.length > 0) await batchUpdate(accessToken, spreadsheetId, reqs2);
 
   // section_headers: insertDimension descending to avoid index drift
+  let insertedSectionCount = 0;
   if (opts.section_headers?.length && nRows > 0) {
     const sorted = [...opts.section_headers].sort((a, b) => b.before_row - a.before_row);
     for (const sh of sorted) {
@@ -239,27 +509,30 @@
         },
       }]);
       // Write label text
-      const labelRange = `${String.fromCharCode(65)}${insertAt + 1}`;
+      const labelRange = `${sheetName}!${String.fromCharCode(65)}${insertAt + 1}`;
       await sheetsRequest(accessToken, spreadsheetId,
         `/values/${encodeURIComponent(labelRange)}?valueInputOption=RAW`, "PUT",
         { range: labelRange, values: [[sh.label]] });
+      insertedSectionCount++;
     }
   }
 
   // summary_row
   if (opts.summary_row && nRows > 0) {
-    const summaryRowIdx = nRows + 1;
+    const insertedSectionCountFinal = insertedSectionCount;
+    const summaryRowIdx = nRows + 1 + insertedSectionCountFinal;
+    const dataEndRow = nRows + insertedSectionCountFinal + 1;
     const summaryVals: any[] = parsed.headers.map((_, i) => {
       const type = (colConfigs[i]?.type ?? columns[i]?.type) as ColumnType;
       const cA1 = colLetter(i);
       if (["currency","integer","decimal"].includes(type))
-        return `=SUM(${cA1}2:${cA1}${nRows + 1})`;
+        return `=SUM(${cA1}2:${cA1}${dataEndRow})`;
       if (type === "percent")
-        return `=AVERAGE(${cA1}2:${cA1}${nRows + 1})`;
+        return `=AVERAGE(${cA1}2:${cA1}${dataEndRow})`;
       if (i === 0) return "Total";
-      return `=COUNTA(${cA1}2:${cA1}${nRows + 1})`;
+      return `=COUNTA(${cA1}2:${cA1}${dataEndRow})`;
     });
-    const sRange = `A${summaryRowIdx + 1}:${colLetter(parsed.headers.length - 1)}${summaryRowIdx + 1}`;
+    const sRange = `${sheetName}!A${summaryRowIdx + 1}:${colLetter(parsed.headers.length - 1)}${summaryRowIdx + 1}`;
     await sheetsRequest(accessToken, spreadsheetId,
       `/values/${encodeURIComponent(sRange)}?valueInputOption=USER_ENTERED`, "PUT",
       { range: sRange, values: [summaryVals] });
@@ -390,7 +663,7 @@ async function processOneSheet(
   const position = sheetData.position ?? "replace";
 
   await pass2DataWrite(accessToken, spreadsheetId, sheetId, sheetName, parsed, colConfigs, position);
-  await pass3Styling(accessToken, spreadsheetId, sheetId, parsed, colConfigs, {
+  await pass3Styling(accessToken, spreadsheetId, sheetId, sheetName, parsed, colConfigs, {
     theme,
     alternating_rows: sheetData.alternating_rows ?? true,
     freeze_rows: sheetData.freeze_rows ?? 1,
@@ -418,7 +691,7 @@ export async function executeWriteSheet(
   // Resolve the list of sheets to process
   const sheetsList: SheetData[] = input.sheets?.length
     ? input.sheets
-    : [{ name: input.sheet_name ?? "Sheet1", ...input } as SheetData];
+    : [{ ...input, name: input.sheet_name ?? "Sheet1" } as SheetData];
 
   let spreadsheetId: string;
   let createdSheets: any[];

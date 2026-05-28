@@ -31,6 +31,7 @@ import { registerSlidesPhase2Tools } from "./tools/slides-phase2";
 import { registerAppsScriptPhase2Tools } from "./tools/appsscript-phase2";
 import { registerConsolidatedTools } from "./tools/consolidated";
 import { registerWriteGoogleDocTool } from "./tools/write-google-doc";
+import { registerWriteGoogleSheetTool } from "./tools/write-google-sheet";
 import {
   registerSlidesTools,
   registerChatTools,
@@ -93,5 +94,6 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
     registerAppsScriptPhase2Tools(this.server, getCreds);
     registerConsolidatedTools(this.server, getCreds);
     registerWriteGoogleDocTool(this.server, getCreds);
+    registerWriteGoogleSheetTool(this.server, getCreds);
   }
 }

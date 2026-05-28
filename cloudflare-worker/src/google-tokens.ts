@@ -21,6 +21,7 @@ export async function storeTokens(
   googleClientId:     string,
   googleClientSecret: string,
   kv:                 KVNamespace,
+  namespace = "workspace",
 ): Promise<void> {
   const record: StoredTokenRecord = {
     access_token:          accessToken,
@@ -30,10 +31,11 @@ export async function storeTokens(
     google_client_id:      googleClientId,
     google_client_secret:  googleClientSecret,
   };
-  await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(record), {
+  const key = `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
+  await kv.put(key, JSON.stringify(record), {
     expirationTtl: KV_TOKEN_TTL,
   });
-  console.log(`[tokens] stored for sub=${sub}, expires_in=${expiresIn}s`);
+  console.log(`[tokens] stored for ns=${namespace} sub=${sub}, expires_in=${expiresIn}s`);
 }
 
 // ── Refresh with exponential backoff ─────────────────────────────────────────
@@ -45,6 +47,7 @@ async function refreshWithRetry(
   googleClientSecret: string,
   kv:                 KVNamespace,
   retries = 3,
+  namespace = "workspace",
 ): Promise<StoredTokenRecord> {
   let lastErr: Error = new Error("unknown");
 
@@ -76,10 +79,10 @@ async function refreshWithRetry(
         google_client_id:     googleClientId,
         google_client_secret: googleClientSecret,
       };
-      await kv.put(`${KV_TOKEN_PREFIX}${sub}`, JSON.stringify(updated), {
+      await kv.put(`${KV_TOKEN_PREFIX}${namespace}:${sub}`, JSON.stringify(updated), {
         expirationTtl: KV_TOKEN_TTL,
       });
-      console.log(`[tokens] refreshed sub=${sub} (attempt ${attempt + 1})`);
+      console.log(`[tokens] refreshed ns=${namespace} sub=${sub} (attempt ${attempt + 1})`);
       return updated;
     }
 
@@ -88,8 +91,8 @@ async function refreshWithRetry(
     try { errBody = JSON.parse(errText); } catch {}
 
     if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
-      console.warn(`[tokens] permanent failure (${errBody.error}) for sub=${sub}`);
-      await kv.delete(`${KV_TOKEN_PREFIX}${sub}`);
+      console.warn(`[tokens] permanent failure (${errBody.error}) for ns=${namespace} sub=${sub}`);
+      await kv.delete(`${KV_TOKEN_PREFIX}${namespace}:${sub}`);
       throw new Error(`Google token refresh failed permanently: ${errBody.error}`);
     }
 
@@ -107,9 +110,11 @@ export async function getValidAccessToken(
   kv:                    KVNamespace,
   fallbackClientId?:     string,
   fallbackClientSecret?: string,
+  namespace = "workspace",
 ): Promise<string> {
-  const raw = await kv.get(`${KV_TOKEN_PREFIX}${sub}`);
-  if (!raw) throw new Error(`No Google token for sub=${sub}. Re-authenticate.`);
+  const tokenKey = `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
+  const raw = await kv.get(tokenKey);
+  if (!raw) throw new Error(`No Google token for ns=${namespace} sub=${sub}. Re-authenticate.`);
 
   const record = JSON.parse(raw) as StoredTokenRecord;
   const now    = Math.floor(Date.now() / 1000);
@@ -121,28 +126,28 @@ export async function getValidAccessToken(
   const clientId     = record.google_client_id     || fallbackClientId;
   const clientSecret = record.google_client_secret || fallbackClientSecret;
   if (!clientId || !clientSecret) {
-    throw new Error(`No Google credentials for sub=${sub}. Re-authenticate.`);
+    throw new Error(`No Google credentials for ns=${namespace} sub=${sub}. Re-authenticate.`);
   }
   if (!record.refresh_token) {
-    throw new Error(`No refresh token for sub=${sub}. Re-authenticate.`);
+    throw new Error(`No refresh token for ns=${namespace} sub=${sub}. Re-authenticate.`);
   }
 
   // Refresh locking — avoid concurrent refresh calls
-  const lockKey = `${KV_LOCK_PREFIX}${sub}`;
+  const lockKey = `${KV_LOCK_PREFIX}${namespace}:${sub}`;
   if (await kv.get(lockKey)) {
-    console.log(`[tokens] refresh lock active for sub=${sub}, using current token`);
+    console.log(`[tokens] refresh lock active for ns=${namespace} sub=${sub}, using current token`);
     return record.access_token;
   }
   await kv.put(lockKey, "1", { expirationTtl: 30 });
 
   try {
-    const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv);
+    const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv, 3, namespace);
     return updated.access_token;
   } catch (err) {
     // 5-min grace: tool error is better than connector disconnect
     const staleSecs = now - record.expires_at;
     if (staleSecs >= 0 && staleSecs < 300) {
-      console.warn(`[tokens] refresh failed, stale token (${staleSecs}s) for sub=${sub}`);
+      console.warn(`[tokens] refresh failed, stale token (${staleSecs}s) for ns=${namespace} sub=${sub}`);
       return record.access_token;
     }
     throw err;

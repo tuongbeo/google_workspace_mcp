@@ -24,6 +24,7 @@ export interface Env {
 
   // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
   GW_SERVER: DurableObjectNamespace;
+  MCP_SERVER?: DurableObjectNamespace;  // used by specialized workers (office/plan/social)
 
   // ─── Google Custom Search (optional) ───────────────────────────────────────────
   GOOGLE_PSE_API_KEY?:    string;

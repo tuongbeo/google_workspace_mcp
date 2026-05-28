@@ -8,6 +8,32 @@ import { ColumnType, ParsedSheet, ParsedColumn, SheetData } from "./types";
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
 
+function parseCSV(csv: string): (string | number | boolean | null)[][] {
+  const rows: string[][] = [];
+  const lines = csv.trim().split(/\r?\n/);
+  for (const line of lines) {
+    const cells: string[] = [];
+    let cur = "";
+    let inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuote = !inQuote;
+      } else if (ch === ',' && !inQuote) {
+        cells.push(cur.trim()); cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    cells.push(cur.trim());
+    rows.push(cells);
+  }
+  return rows;
+}
+
+// ─── Markdown table parser ────────────────────────────────────────────────────
+
 function parseMarkdownTable(md: string): string[][] {
   return md.trim().split(/\r?\n/)
     .filter(l => l.trim().startsWith("|"))
@@ -76,7 +102,8 @@ export function detectColumnType(
 
   // Status: ≤8 unique string values
   const unique = new Set(strVals);
-  if (unique.size <= 8) return "status";
+  // Status: ≤8 unique values AND all values are short strings (max 40 chars)
+  if (unique.size <= 8 && sv.every((v: string) => v.length <= 40)) return "status";
 
   return "text";
 }
@@ -94,6 +121,27 @@ export function buildNumberFormat(type: ColumnType, override?: string): string |
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
+
+export function parseInput(
+  input: Pick<SheetData, "data" | "csv" | "markdown_table">,
+  columnOverrides?: Record<number, { type?: ColumnType; format?: string }>,
+): ParsedSheet {
+  let raw: (string | number | boolean | null)[][];
+
+  if (input.data) {
+    raw = [input.data.headers as any[], ...input.data.rows];
+  } else if (input.csv) {
+    raw = parseCSV(input.csv);
+  } else if (input.markdown_table) {
+    raw = parseMarkdownTable(input.markdown_table);
+  } else {
+    throw new Error("Provide exactly one of: data, csv, markdown_table");
+  }
+
+  if (raw.length < 1) throw new Error("No data rows found in input");
+
+  const headers = raw[0].map(h => String(h ?? ""));
+  const rows = raw.slice(1);
 
   const columns: ParsedColumn[] = headers.map((header, i) => {
     const values = rows.map(r => r[i] ?? null);

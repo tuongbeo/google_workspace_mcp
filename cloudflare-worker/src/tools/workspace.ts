@@ -502,7 +502,9 @@ export function registerFormsTools(server: McpServer, getCreds: GetCredsFunc) {
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
 
-export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+// ── Granular extra tool groups (for specialized workers) ──────────────────────
+
+export function registerSlidesPageTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_slide_page", "Get detailed information about a specific slide in a presentation.", {
     presentation_id: z.string(),
     page_object_id: z.string().describe("Page/slide object ID (from get_presentation)"),
@@ -524,7 +526,9 @@ export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCred
     const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}/thumbnail?${params}`, "GET") as any;
     return { content: [{ type: "text", text: `Thumbnail URL (${thumbnail_size}):\n${data.contentUrl}\n\nDimensions: ${data.width}×${data.height}` }] };
   }));
+}
 
+export function registerChatReactionTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("create_chat_reaction", "Add an emoji reaction to a Google Chat message.", {
     message_name: z.string().describe("Message name in format 'spaces/{space}/messages/{message}'"),
     emoji: z.string().describe("Unicode emoji character, e.g. '👍' or '🎉'"),
@@ -549,7 +553,9 @@ export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCred
     if (data.driveDataRef?.driveFileId) lines.push(`Drive File ID: ${data.driveDataRef.driveFileId}\nView: https://drive.google.com/file/d/${data.driveDataRef.driveFileId}/view`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
+}
 
+export function registerTaskListExtraTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_task_list", "Get details of a specific Google Task list.", {
     tasklist_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id }) => {
@@ -557,7 +563,17 @@ export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCred
     const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken) as any;
     return { content: [{ type: "text", text: `Task List: ${data.title}\nID: ${data.id}\nUpdated: ${data.updated || "N/A"}` }] };
   }));
+}
 
+// ── Composite: all granular extras (for full workspace worker) ───────────────
+export function registerWorkspaceExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+  registerSlidesPageTools(server, getCreds);
+  registerChatReactionTools(server, getCreds);
+  registerTaskListExtraTools(server, getCreds);
+  registerFormSettingsTools(server, getCreds);
+}
+
+export function registerFormSettingsTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("set_form_publish_settings", "Configure publish settings for a Google Form (collecting emails, limiting responses, etc.).", {
     form_id: z.string(),
     collect_email: z.boolean().optional().describe("Require respondents to sign in with Google"),

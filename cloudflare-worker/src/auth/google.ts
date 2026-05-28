@@ -12,38 +12,29 @@ import { Hono } from "hono";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import type { Env, OAuthProps } from "../types";
 import { storeTokens } from "../google-tokens";
+import { SCOPES_WORKSPACE } from "./scopes";
 
 const GOOGLE_AUTH_URL     = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL    = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
 
-const GOOGLE_SCOPES = [
-  "openid", "email", "profile",
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/gmail.settings.basic",
-  "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/documents",
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/presentations",
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/tasks",
-  "https://www.googleapis.com/auth/forms.body",
-  "https://www.googleapis.com/auth/chat.messages",
-  "https://www.googleapis.com/auth/chat.spaces",
-  "https://www.googleapis.com/auth/contacts",
-  "https://www.googleapis.com/auth/script.projects",
-  "https://www.googleapis.com/auth/script.metrics",
-  "https://www.googleapis.com/auth/script.deployments",
-].join(" ");
-
 type HonoEnv = { Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } };
 
-const app = new Hono<HonoEnv>();
+/**
+ * Factory: create a Google OAuth handler for a specific set of scopes and token namespace.
+ * @param scopes - OAuth scopes to request from Google
+ * @param namespace - Token storage namespace (e.g. "workspace", "office", "plan", "social")
+ */
+export function createGoogleHandler(
+  scopes: string[],
+  namespace = "workspace",
+): Hono<HonoEnv> {
+  const scopeString = scopes.join(" ");
+  const app = new Hono<HonoEnv>();
 
 // ── GET /authorize → save Claude.ai's request → redirect to Google ────────────
 
-app.get("/authorize", async (c) => {
+  app.get("/authorize", async (c) => {
   const url = new URL(c.req.url);
   const clientId   = url.searchParams.get("client_id")   || "";
   const redirectUri = url.searchParams.get("redirect_uri") || "";
@@ -87,7 +78,7 @@ app.get("/authorize", async (c) => {
   googleUrl.searchParams.set("client_id",     c.env.GOOGLE_OAUTH_CLIENT_ID);
   googleUrl.searchParams.set("redirect_uri",  callbackUrl);
   googleUrl.searchParams.set("response_type", "code");
-  googleUrl.searchParams.set("scope",         GOOGLE_SCOPES);
+  googleUrl.searchParams.set("scope",         scopeString);
   googleUrl.searchParams.set("state",         stateId);
   googleUrl.searchParams.set("access_type",   "offline");
   googleUrl.searchParams.set("prompt",        "consent");
@@ -98,7 +89,7 @@ app.get("/authorize", async (c) => {
 
 // ── GET /callback ← Google redirects here ────────────────────────────────────
 
-app.get("/callback", async (c) => {
+  app.get("/callback", async (c) => {
   const code    = c.req.query("code");
   const stateId = c.req.query("state");
   const error   = c.req.query("error");
@@ -170,6 +161,7 @@ app.get("/callback", async (c) => {
     c.env.GOOGLE_OAUTH_CLIENT_ID,
     c.env.GOOGLE_OAUTH_CLIENT_SECRET,
     c.env.TOKENS_KV,
+    namespace,
   );
 
   // Complete OAuth: OAuthProvider issues MCP session token to Claude.ai
@@ -182,7 +174,13 @@ app.get("/callback", async (c) => {
   });
 
   return c.redirect(redirectTo);
-});
+  });
+
+  return app;
+} // end createGoogleHandler
+
+// ── Backward-compatible export (Workspace full worker) ────────────────────────
+export const GoogleHandler = createGoogleHandler(SCOPES_WORKSPACE, "workspace");
 
 // ── Error page helper ─────────────────────────────────────────────────────────
 
@@ -198,4 +196,4 @@ h2{color:#d93025;margin-bottom:12px}p{color:#555;line-height:1.6}</style></head>
 </div></body></html>`;
 }
 
-export { app as GoogleHandler };
+
