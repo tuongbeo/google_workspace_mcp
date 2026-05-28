@@ -2,6 +2,9 @@
  * Types for Google Workspace MCP Cloudflare Worker
  */
 
+/** Shared credentials accessor type. Used by every tool registration function. */
+export type GetCredsFunc = () => Promise<{ accessToken: string }>;
+
 // Props injected into McpAgent by OAuthProvider after Google auth completes.
 // Available as `this.props` inside GoogleWorkspaceAgent.
 export interface OAuthProps {

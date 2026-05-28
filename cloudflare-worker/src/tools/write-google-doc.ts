@@ -11,8 +11,8 @@ import { withErrorHandler } from "../utils/tool-handler";
 import { parseMarkdown } from "../docs-engine/parser";
 import { buildExecutionPlan } from "../docs-engine/builder";
 import { executePass1, executePass2, executePass3, applyHeaderFooter } from "../docs-engine/executor";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) {
   server.tool(
@@ -114,7 +114,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
           const tabProps: Record<string, unknown> = { title: new_tab.title };
           if (new_tab.emoji) tabProps.iconEmoji = new_tab.emoji;
           if (new_tab.parent_tab_id) tabProps.parentTabId = new_tab.parent_tab_id;
-          const result = await docsRequest(accessToken, docId, "POST", ":batchUpdate", {
+          const result = await docsRequest(accessToken, docId, ":batchUpdate", "POST", {
             requests: [{ addDocumentTab: { tabProperties: tabProps } }],
           }) as any;
           activeTabId = result.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
@@ -123,7 +123,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
         // Handle replace mode: clear content
         if (position === "replace") {
           const path = activeTabId ? "?includeTabsContent=true" : "";
-          const doc = await docsRequest(accessToken, docId, "GET", path) as any;
+          const doc = await docsRequest(accessToken, docId, path) as any;
           let bodyContent: any[];
           if (activeTabId && doc.tabs) {
             bodyContent = findTab(doc.tabs, activeTabId)?.documentTab?.body?.content ?? [];
@@ -138,7 +138,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
               : { startIndex: 1, endIndex: endIndex - 1 };
             const clearBody: Record<string, unknown> = { requests: [{ deleteContentRange: { range } }] };
             if (activeTabId) clearBody.tabsCriteria = { tabIds: [activeTabId] };
-            await docsRequest(accessToken, docId, "POST", ":batchUpdate", clearBody);
+            await docsRequest(accessToken, docId, ":batchUpdate", "POST", clearBody);
           }
         }
 
@@ -155,7 +155,7 @@ export function registerWriteGoogleDocTool(server: McpServer, getCreds: GetCreds
         // Get start index for append
         if (position === "append") {
           const path2 = activeTabId ? "?includeTabsContent=true" : "";
-          const doc2 = await docsRequest(accessToken, docId, "GET", path2) as any;
+          const doc2 = await docsRequest(accessToken, docId, path2) as any;
           let bodyContent2: any[];
           if (activeTabId && doc2.tabs) {
             bodyContent2 = findTab(doc2.tabs, activeTabId)?.documentTab?.body?.content ?? [];

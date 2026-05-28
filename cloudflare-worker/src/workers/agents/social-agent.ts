@@ -9,7 +9,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env, OAuthProps } from "../../types";
-import { getValidAccessToken } from "../../google-tokens";
+import { makeGetCreds } from "../../google-tokens";
 
 import { registerContactsTools, registerContactsExtraTools } from "../../tools/contacts";
 import { registerChatTools, registerChatReactionTools } from "../../tools/workspace";
@@ -28,19 +28,10 @@ export class SocialAgent extends McpAgent<Env, Record<string, never>, OAuthProps
 
   async init() {
     const sub = this.props.google_sub;
-    const env = this.env;
 
     console.log(`[social-agent] init for sub=${sub}, email=${this.props.email}`);
 
-    const getCreds = async () => ({
-      accessToken: await getValidAccessToken(
-        sub,
-        env.TOKENS_KV,
-        env.GOOGLE_OAUTH_CLIENT_ID,
-        env.GOOGLE_OAUTH_CLIENT_SECRET,
-        "social",
-      ),
-    });
+    const getCreds = makeGetCreds(sub, this.env, "social");
 
     // Chat (~6 tools)
     registerChatTools(this.server, getCreds);

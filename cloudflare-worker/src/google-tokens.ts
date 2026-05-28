@@ -4,12 +4,24 @@
  * Proxy JWT is now handled by @cloudflare/workers-oauth-provider.
  */
 
-import { StoredTokenRecord } from "./types";
+import type { StoredTokenRecord, GetCredsFunc } from "./types";
 
-const KV_TOKEN_PREFIX = "token:";
-const KV_LOCK_PREFIX  = "lock:refresh:";
-const KV_TOKEN_TTL    = 90 * 24 * 3600;   // 90 days
+const KV_TOKEN_PREFIX   = "token:";
+const KV_LOCK_PREFIX    = "lock:refresh:";
+const KV_TOKEN_TTL      = 90 * 24 * 3600; // 90 days
 const REFRESH_THRESHOLD = 10 * 60;         // refresh if < 10 min remaining
+
+// ── Key helpers ───────────────────────────────────────────────────────────────
+
+/** Canonical KV key for a stored token. Single source of truth for key schema. */
+function tokenKey(namespace: string, sub: string): string {
+  return `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
+}
+
+/** Canonical KV key for a refresh lock. */
+function lockKey(namespace: string, sub: string): string {
+  return `${KV_LOCK_PREFIX}${namespace}:${sub}`;
+}
 
 // ── Store tokens after OAuth callback ────────────────────────────────────────
 
@@ -31,8 +43,7 @@ export async function storeTokens(
     google_client_id:      googleClientId,
     google_client_secret:  googleClientSecret,
   };
-  const key = `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
-  await kv.put(key, JSON.stringify(record), {
+  await kv.put(tokenKey(namespace, sub), JSON.stringify(record), {
     expirationTtl: KV_TOKEN_TTL,
   });
   console.log(`[tokens] stored for ns=${namespace} sub=${sub}, expires_in=${expiresIn}s`);
@@ -79,7 +90,7 @@ async function refreshWithRetry(
         google_client_id:     googleClientId,
         google_client_secret: googleClientSecret,
       };
-      await kv.put(`${KV_TOKEN_PREFIX}${namespace}:${sub}`, JSON.stringify(updated), {
+      await kv.put(tokenKey(namespace, sub), JSON.stringify(updated), {
         expirationTtl: KV_TOKEN_TTL,
       });
       console.log(`[tokens] refreshed ns=${namespace} sub=${sub} (attempt ${attempt + 1})`);
@@ -92,7 +103,7 @@ async function refreshWithRetry(
 
     if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
       console.warn(`[tokens] permanent failure (${errBody.error}) for ns=${namespace} sub=${sub}`);
-      await kv.delete(`${KV_TOKEN_PREFIX}${namespace}:${sub}`);
+      await kv.delete(tokenKey(namespace, sub));
       throw new Error(`Google token refresh failed permanently: ${errBody.error}`);
     }
 
@@ -112,8 +123,7 @@ export async function getValidAccessToken(
   fallbackClientSecret?: string,
   namespace = "workspace",
 ): Promise<string> {
-  const tokenKey = `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
-  const raw = await kv.get(tokenKey);
+  const raw = await kv.get(tokenKey(namespace, sub));
   if (!raw) throw new Error(`No Google token for ns=${namespace} sub=${sub}. Re-authenticate.`);
 
   const record = JSON.parse(raw) as StoredTokenRecord;
@@ -133,12 +143,12 @@ export async function getValidAccessToken(
   }
 
   // Refresh locking — avoid concurrent refresh calls
-  const lockKey = `${KV_LOCK_PREFIX}${namespace}:${sub}`;
-  if (await kv.get(lockKey)) {
+  const lock = lockKey(namespace, sub);
+  if (await kv.get(lock)) {
     console.log(`[tokens] refresh lock active for ns=${namespace} sub=${sub}, using current token`);
     return record.access_token;
   }
-  await kv.put(lockKey, "1", { expirationTtl: 30 });
+  await kv.put(lock, "1", { expirationTtl: 30 });
 
   try {
     const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv, 3, namespace);
@@ -154,4 +164,29 @@ export async function getValidAccessToken(
   } finally {
     await kv.delete(lockKey).catch(() => {});
   }
+}
+
+// ── Agent helper ──────────────────────────────────────────────────────────────
+
+/**
+ * Factory: build a `getCreds` function for an MCP agent.
+ * Eliminates the same 6-line block repeated in every agent init().
+ *
+ * Usage:
+ *   const getCreds = makeGetCreds(this.props.google_sub, this.env, "office");
+ */
+export function makeGetCreds(
+  sub:       string,
+  env:       { TOKENS_KV: KVNamespace; GOOGLE_OAUTH_CLIENT_ID: string; GOOGLE_OAUTH_CLIENT_SECRET: string },
+  namespace = "workspace",
+): GetCredsFunc {
+  return async () => ({
+    accessToken: await getValidAccessToken(
+      sub,
+      env.TOKENS_KV,
+      env.GOOGLE_OAUTH_CLIENT_ID,
+      env.GOOGLE_OAUTH_CLIENT_SECRET,
+      namespace,
+    ),
+  });
 }

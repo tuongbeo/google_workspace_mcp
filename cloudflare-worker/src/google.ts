@@ -74,11 +74,15 @@ export async function driveRequest(
 
 const DOCS_BASE = "https://docs.googleapis.com/v1/documents";
 
+/**
+ * Google Docs API request.
+ * Parameter order matches the other API helpers (path before method).
+ */
 export async function docsRequest(
   accessToken: string,
   documentId: string,
-  method = "GET",
   path = "",
+  method = "GET",
   body?: unknown
 ): Promise<unknown> {
   return googleFetch(`${DOCS_BASE}/${documentId}${path}`, accessToken, method, body);

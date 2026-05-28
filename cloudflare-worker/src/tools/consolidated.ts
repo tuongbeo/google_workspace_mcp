@@ -9,8 +9,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsFunc) {
 
@@ -57,7 +57,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
         if (title) props.title = title;
         if (emoji) props.iconEmoji = emoji;
         if (parent_tab_id) props.parentTabId = parent_tab_id;
-        const res = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ addDocumentTab: { tabProperties: props } }],
         }) as any;
         const newTabId = res.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
@@ -66,7 +66,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
 
       if (action === "delete") {
         if (!tab_id) throw new Error("tab_id required");
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ deleteDocumentTab: { tabId: tab_id } }],
         });
         return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
@@ -78,7 +78,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
         const fields: string[] = [];
         if (title) { props.title = title; fields.push("title"); }
         if (emoji) { props.iconEmoji = emoji; fields.push("iconEmoji"); }
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ updateDocumentTab: { tabProperties: props, fields: fields.join(",") } }],
         });
         return { content: [{ type: "text", text: `Tab ${tab_id} updated.` }] };
@@ -115,7 +115,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
 
       if (action === "create") {
         if (!name || start_index === undefined || end_index === undefined) throw new Error("name, start_index, end_index required");
-        const res = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ createNamedRange: { name, range: { startIndex: start_index, endIndex: end_index } } }],
         }) as any;
         return { content: [{ type: "text", text: `Named range "${name}" created. ID: ${res.replies?.[0]?.createNamedRange?.namedRangeId}` }] };
@@ -124,7 +124,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
       if (action === "delete") {
         if (!named_range_id && !name) throw new Error("named_range_id or name required");
         const req: any = named_range_id ? { namedRangeId: named_range_id } : { name };
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ deleteNamedRange: req }],
         });
         return { content: [{ type: "text", text: `Named range deleted.` }] };
@@ -215,7 +215,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
 
       if (action === "accept") {
         if (!suggestion_id) throw new Error("suggestion_id required");
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ acceptAllSuggestionsWithId: { suggestionId: suggestion_id } }],
         });
         return { content: [{ type: "text", text: `Suggestion ${suggestion_id} accepted.` }] };
@@ -223,7 +223,7 @@ export function registerConsolidatedTools(server: McpServer, getCreds: GetCredsF
 
       if (action === "reject") {
         if (!suggestion_id) throw new Error("suggestion_id required");
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ rejectAllSuggestionsWithId: { suggestionId: suggestion_id } }],
         });
         return { content: [{ type: "text", text: `Suggestion ${suggestion_id} rejected.` }] };

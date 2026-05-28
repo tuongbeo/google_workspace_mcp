@@ -6,8 +6,8 @@ import { z } from "zod";
 import { sheetsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import { getTheme, hexToSheetsRgb } from "../styles";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerSheetsTools(server: McpServer, getCreds: GetCredsFunc) {
 

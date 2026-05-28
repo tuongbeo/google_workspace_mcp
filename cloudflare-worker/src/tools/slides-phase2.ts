@@ -6,8 +6,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 const SLIDES_BASE = "https://slides.googleapis.com/v1/presentations";
 

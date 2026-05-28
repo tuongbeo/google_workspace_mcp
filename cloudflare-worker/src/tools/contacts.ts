@@ -5,8 +5,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 const PEOPLE_BASE = "https://people.googleapis.com/v1";
 const FIELDS = "names,emailAddresses,phoneNumbers,organizations,addresses,biographies,birthdays,resourceName";

@@ -6,16 +6,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
-import { getTheme, getFontPair, deriveDocTokens } from "../styles";
-
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
+import { getTheme, getFontPair, deriveDocTokens, hexToSheetsRgb } from "../styles";
+import type { GetCredsFunc } from "../types";
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-function hexToRgb(hex: string) {
-  const h = hex.replace("#", "");
-  return { red: parseInt(h.slice(0,2),16)/255, green: parseInt(h.slice(2,4),16)/255, blue: parseInt(h.slice(4,6),16)/255 };
-}
+/** Convert hex color to Google Docs RGB object. Reuses hexToSheetsRgb from styles. */
+function hexToRgb(hex: string) { return hexToSheetsRgb(hex); }
 
 function buildNamedStyleReq(styleType: string, color: string, size: number, bold: boolean, font: string, above: number, below: number) {
   return {

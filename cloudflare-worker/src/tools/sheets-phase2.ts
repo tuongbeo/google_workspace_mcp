@@ -8,8 +8,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sheetsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 function hexRgb(hex: string) {
   const h = hex.replace("#","");

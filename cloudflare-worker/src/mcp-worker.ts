@@ -12,7 +12,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env, OAuthProps } from "./types";
-import { getValidAccessToken } from "./google-tokens";
+import { makeGetCreds } from "./google-tokens";
 import { registerGmailTools, registerGmailExtraTools } from "./tools/gmail";
 import { registerCalendarTools } from "./tools/calendar";
 import { registerDriveTools, registerDriveExtraTools } from "./tools/drive";
@@ -50,21 +50,12 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
 
   async init() {
     const sub = this.props.google_sub;
-    const env = this.env;
 
     console.log(`[agent] init for sub=${sub}, email=${this.props.email}`);
 
-    // getCreds is called by each tool handler — fetches/refreshes token lazily
-    const getCreds = async () => ({
-      accessToken: await getValidAccessToken(
-        sub,
-        env.TOKENS_KV,
-        env.GOOGLE_OAUTH_CLIENT_ID,
-        env.GOOGLE_OAUTH_CLIENT_SECRET,
-      ),
-    });
+    const getCreds = makeGetCreds(sub, this.env);
 
-    // Register all 191 tools (same as before)
+    // getCreds is called lazily by each tool handler (fetches/refreshes token on demand)
     registerGmailTools(this.server, getCreds);
     registerGmailExtraTools(this.server, getCreds);
     registerCalendarTools(this.server, getCreds);

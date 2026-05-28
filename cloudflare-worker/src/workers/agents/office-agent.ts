@@ -9,7 +9,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env, OAuthProps } from "../../types";
-import { getValidAccessToken } from "../../google-tokens";
+import { makeGetCreds } from "../../google-tokens";
 
 // Docs
 import { registerDocsTools, registerDocsExtraTools } from "../../tools/docs";
@@ -52,19 +52,10 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
 
   async init() {
     const sub = this.props.google_sub;
-    const env = this.env;
 
     console.log(`[office-agent] init for sub=${sub}, email=${this.props.email}`);
 
-    const getCreds = async () => ({
-      accessToken: await getValidAccessToken(
-        sub,
-        env.TOKENS_KV,
-        env.GOOGLE_OAUTH_CLIENT_ID,
-        env.GOOGLE_OAUTH_CLIENT_SECRET,
-        "office",
-      ),
-    });
+    const getCreds = makeGetCreds(sub, this.env, "office");
 
     // Docs (~20 tools)
     registerDocsTools(this.server, getCreds);

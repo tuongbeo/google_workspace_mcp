@@ -7,8 +7,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
 
@@ -34,7 +34,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
         endIndex: end_index,
       };
       if (tab_id) range.tabId = tab_id;
-      const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ createNamedRange: { name, range } }],
       }) as any;
       const namedRangeId = result.replies?.[0]?.createNamedRange?.namedRangeId;
@@ -62,7 +62,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
     { readOnlyHint: true },
     withErrorHandler(async ({ document_id }) => {
       const { accessToken } = await getCreds();
-      const doc = await docsRequest(accessToken, document_id, "GET", "?fields=namedRanges,title") as any;
+      const doc = await docsRequest(accessToken, document_id, "?fields=namedRanges,title") as any;
       const namedRanges = doc.namedRanges || {};
       const entries = Object.entries(namedRanges) as [string, any][];
       if (!entries.length) {
@@ -102,7 +102,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
       const deleteReq: Record<string, unknown> = {};
       if (named_range_id) deleteReq.namedRangeId = named_range_id;
       else if (name) deleteReq.name = name;
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ deleteNamedRange: deleteReq }],
       });
       const label = named_range_id ? `ID "${named_range_id}"` : `name "${name}"`;
@@ -128,7 +128,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
       const { accessToken } = await getCreds();
       const location: Record<string, unknown> = { index };
       if (tab_id) location.tabId = tab_id;
-      const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ createFootnote: { location } }],
       }) as any;
       const footnoteId = result.replies?.[0]?.createFootnote?.footnoteId;
@@ -185,7 +185,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
         };
       }
 
-      const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ insertInlineImage: req }],
       }) as any;
       const objectId = result.replies?.[0]?.insertInlineImage?.objectId;
@@ -265,7 +265,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
       // Deduplicate fields
       const uniqueFields = [...new Set(fields)];
 
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ updateDocumentStyle: { documentStyle: style, fields: uniqueFields.join(",") } }],
       });
 
@@ -354,7 +354,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
     { readOnlyHint: false },
     withErrorHandler(async ({ document_id, suggestion_id }) => {
       const { accessToken } = await getCreds();
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ acceptSuggestion: { suggestionId: suggestion_id } }],
       });
       return { content: [{ type: "text", text: `Suggestion "${suggestion_id}" accepted.` }] };
@@ -373,7 +373,7 @@ export function registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsF
     { readOnlyHint: false },
     withErrorHandler(async ({ document_id, suggestion_id }) => {
       const { accessToken } = await getCreds();
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ rejectSuggestion: { suggestionId: suggestion_id } }],
       });
       return { content: [{ type: "text", text: `Suggestion "${suggestion_id}" rejected.` }] };

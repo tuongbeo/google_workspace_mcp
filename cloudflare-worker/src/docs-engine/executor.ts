@@ -15,7 +15,7 @@ export async function executePass1(
   tabId?: string
 ): Promise<void> {
   if (!plan.pass1Requests.length) return;
-  await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: plan.pass1Requests });
+  await docsRequest(accessToken, documentId, ":batchUpdate", "POST", { requests: plan.pass1Requests });
 }
 
 // ── Pass 2: Rich elements (images, mentions, footnotes, TOC) ─────────────────
@@ -33,7 +33,7 @@ export async function executePass2(
   // All rich elements (images, mentions, footnotes, TOC, tables) use placeholders
   // Re-read document to find all placeholders at once
   const path = tabId ? "?includeTabsContent=true" : "";
-  const doc = await docsRequest(accessToken, documentId, "GET", path) as any;
+  const doc = await docsRequest(accessToken, documentId, path) as any;
 
   let bodyContent: any[];
   if (tabId && doc.tabs) {
@@ -103,7 +103,7 @@ async function insertRichElement(
         },
       };
       const body: Record<string, unknown> = { requests: [deleteReq, insertReq] };
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
+      await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body);
       break;
     }
 
@@ -132,13 +132,13 @@ async function insertRichElement(
         const insertNL = tabId
           ? { index: idx, tabId }
           : { index: idx };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: insertNL, text: "\n" } }],
         });
 
         // After "\n" insert: placeholder shifted to idx+1, fresh para starts at idx+1
         const freshLoc = tabId ? { index: idx + 1, tabId } : { index: idx + 1 };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertPerson: { personProperties: { email: el.email }, location: freshLoc } }],
         });
 
@@ -146,7 +146,7 @@ async function insertRichElement(
         const phShifted = tabId
           ? { startIndex: idx + 2, endIndex: idx + 2 + el.placeholder.length, tabId }
           : { startIndex: idx + 2, endIndex: idx + 2 + el.placeholder.length };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ deleteContentRange: { range: phShifted } }],
         });
 
@@ -154,7 +154,7 @@ async function insertRichElement(
         const nlRange = tabId
           ? { startIndex: idx, endIndex: idx + 1, tabId }
           : { startIndex: idx, endIndex: idx + 1 };
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ deleteContentRange: { range: nlRange } }],
         });
 
@@ -162,7 +162,7 @@ async function insertRichElement(
         // Fallback: replace placeholder with @displayName text
         const displayName = el.name || el.email;
         try {
-          await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+          await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
             requests: [{ replaceAllText: {
               containsText: { text: el.placeholder, matchCase: true },
               replaceText: `@${displayName}`,
@@ -176,10 +176,10 @@ async function insertRichElement(
 
         case "footnote": {
       const body: Record<string, unknown> = { requests: [deleteReq, { createFootnote: { location: loc } }] };
-      const result = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body) as any;
+      const result = await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body) as any;
       const fnId = result.replies?.find((r: any) => r.createFootnote)?.createFootnote?.footnoteId;
       if (fnId && el.footnoteContent) {
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: { segmentId: fnId, index: 0 }, text: el.footnoteContent } }],
         });
       }
@@ -193,7 +193,7 @@ async function insertRichElement(
           { insertTableOfContents: { location: loc } },
         ],
       };
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
+      await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body);
       break;
     }
 
@@ -211,7 +211,7 @@ async function insertRichElement(
         }
         // Delete placeholder + insert table at same location
         const plEnd = idx + el.placeholder.length;
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [
             { deleteContentRange: { range: tabId ? { startIndex: idx, endIndex: plEnd, tabId } : { startIndex: idx, endIndex: plEnd } } },
             { insertTable: { rows: tableData.nRows, columns: tableData.nCols, location: { index: idx, ...(tabId ? { tabId } : {}) } } },
@@ -235,7 +235,7 @@ export async function executePass3(
   plan: ExecutionPlan
 ): Promise<void> {
   if (!plan.themeRequests.length) return;
-  await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+  await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
     requests: plan.themeRequests,
   });
 }
@@ -257,12 +257,12 @@ export async function applyHeaderFooter(
     if (!segId) {
       // Create header/footer
       const createKey = type === "header" ? "createHeader" : "createFooter";
-      const result = await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+      const result = await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
         requests: [{ [createKey]: { type: "DEFAULT" } }],
       }) as any;
       const newId = result.replies?.[0]?.[createKey]?.[type === "header" ? "headerId" : "footerId"];
       if (newId) {
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: { segmentId: newId, index: 0 }, text } }],
         });
       }
@@ -274,7 +274,7 @@ export async function applyHeaderFooter(
       const reqs: object[] = [];
       if (endIdx > 1) reqs.push({ deleteContentRange: { range: { segmentId: segId, startIndex: 0, endIndex: endIdx - 1 } } });
       reqs.push({ insertText: { location: { segmentId: segId, index: 0 }, text } });
-      await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: reqs });
+      await docsRequest(accessToken, documentId, ":batchUpdate", "POST", { requests: reqs });
     }
   }
 
@@ -348,7 +348,7 @@ async function fillTableCells(
   tabId?: string
 ): Promise<void> {
   const path = tabId ? "?includeTabsContent=true" : "";
-  const doc = await docsRequest(accessToken, documentId, "GET", path) as any;
+  const doc = await docsRequest(accessToken, documentId, path) as any;
   const bodyContent = tabId
     ? findTab(doc.tabs, tabId)?.documentTab?.body?.content
     : doc.body?.content;
@@ -386,7 +386,7 @@ async function fillTableCells(
 
   // Insert in reverse order
   const body: Record<string, unknown> = { requests: insertReqs.reverse() };
-  await docsRequest(accessToken, documentId, "POST", ":batchUpdate", body);
+  await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body);
 
   // Style header row: background + bold white text per cell
   const headerRow = tableElem.table.tableRows[0];
@@ -458,7 +458,7 @@ async function fillTableCells(
 
     if (styleReqs.length) {
       try {
-        await docsRequest(accessToken, documentId, "POST", ":batchUpdate", { requests: styleReqs });
+        await docsRequest(accessToken, documentId, ":batchUpdate", "POST", { requests: styleReqs });
       } catch (e: any) {
         // Table style non-critical
       }

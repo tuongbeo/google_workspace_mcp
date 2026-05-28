@@ -9,8 +9,8 @@ import { z } from "zod";
 import { withErrorHandler } from "../utils/tool-handler";
 import { executeWriteSheet } from "../sheets-engine/executor";
 import { WriteSheetInput } from "../sheets-engine/types";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 // ── Zod sub-schemas ──────────────────────────────────────────────────────────
 

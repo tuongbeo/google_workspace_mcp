@@ -6,8 +6,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 export function registerDocsPhase2Tools(server: McpServer, getCreds: GetCredsFunc) {
 
@@ -83,7 +83,7 @@ export function registerDocsPhase2Tools(server: McpServer, getCreds: GetCredsFun
         };
       }
 
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: [req] });
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [req] });
       return { content: [{ type: "text", text: `Table cell action "${action}" completed.` }] };
     }),
   );
@@ -100,7 +100,7 @@ export function registerDocsPhase2Tools(server: McpServer, getCreds: GetCredsFun
     { readOnlyHint: false },
     withErrorHandler(async ({ document_id, index, section_type = "NEXT_PAGE" }) => {
       const { accessToken } = await getCreds();
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{
           insertSectionBreak: {
             location: { index },
@@ -124,7 +124,7 @@ export function registerDocsPhase2Tools(server: McpServer, getCreds: GetCredsFun
     { readOnlyHint: false },
     withErrorHandler(async ({ document_id, start_index, end_index }) => {
       const { accessToken } = await getCreds();
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{
           deleteParagraphBullets: {
             range: { startIndex: start_index, endIndex: end_index },

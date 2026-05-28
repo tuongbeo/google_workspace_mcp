@@ -5,8 +5,54 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import type { GetCredsFunc } from "../types";
 
-type GetCredsFunc = () => Promise<{ accessToken: string }>;
+// ── Module-level helpers (pure functions, fully testable) ─────────────────────
+
+/** Extract readable text lines from a Doc body content array. */
+function extractDocText(bodyContent: any[]): string[] {
+  const lines: string[] = [];
+  for (const elem of bodyContent || []) {
+    if (!elem.paragraph) continue;
+    const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
+    const text = (elem.paragraph.elements || [])
+      .map((e: any) => {
+        if (e.textRun) return e.textRun.content || "";
+        if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
+        return "";
+      })
+      .join("")
+      .trimEnd();
+    if (!text.trim()) continue;
+    if (style === "HEADING_1") lines.push(`# ${text}`);
+    else if (style === "HEADING_2") lines.push(`## ${text}`);
+    else if (style === "HEADING_3") lines.push(`### ${text}`);
+    else lines.push(text);
+  }
+  return lines;
+}
+
+/** Walk a tab tree and collect text content into a lines array. */
+function walkDocTabs(tabList: any[], lines: string[]): void {
+  for (const tab of tabList) {
+    const p = tab.tabProperties;
+    lines.push(`\n## [Tab] ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"} (${p?.tabId})`);
+    lines.push(...extractDocText(tab.documentTab?.body?.content));
+    if (tab.childTabs?.length) walkDocTabs(tab.childTabs, lines);
+  }
+}
+
+/** Find a tab by ID in a nested tab tree. Returns null if not found. */
+function findDocTab(tabList: any[], id: string): any | null {
+  for (const tab of tabList) {
+    if (tab.tabProperties?.tabId === id) return tab;
+    if (tab.childTabs?.length) {
+      const found = findDocTab(tab.childTabs, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
 
@@ -18,60 +64,20 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const needsTabs = !!(tab_id || include_all_tabs);
     const path = needsTabs ? "?includeTabsContent=true" : "";
-    const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
-
-    function extractContent(bodyContent: any[]): string[] {
-      const lines: string[] = [];
-      for (const elem of bodyContent || []) {
-        if (!elem.paragraph) continue;
-        const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
-        const text = (elem.paragraph.elements || [])
-          .map((e: any) => {
-            if (e.textRun) return e.textRun.content || "";
-            if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
-            return "";
-          })
-          .join("")
-          .trimEnd();
-        if (!text.trim()) continue;
-        if (style === "HEADING_1") lines.push(`# ${text}`);
-        else if (style === "HEADING_2") lines.push(`## ${text}`);
-        else if (style === "HEADING_3") lines.push(`### ${text}`);
-        else lines.push(text);
-      }
-      return lines;
-    }
+    const doc = await docsRequest(accessToken, document_id, path) as any;
 
     const lines: string[] = [`# ${doc.title}`, ""];
 
     if (include_all_tabs && doc.tabs?.length) {
-      function walkTabs(tabList: any[]) {
-        for (const tab of tabList) {
-          const p = tab.tabProperties;
-          lines.push(`\n## [Tab] ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"} (${p?.tabId})`);
-          lines.push(...extractContent(tab.documentTab?.body?.content));
-          if (tab.childTabs?.length) walkTabs(tab.childTabs);
-        }
-      }
-      walkTabs(doc.tabs);
+      walkDocTabs(doc.tabs, lines);
     } else if (tab_id && doc.tabs?.length) {
-      function findTab(tabList: any[], id: string): any | null {
-        for (const tab of tabList) {
-          if (tab.tabProperties?.tabId === id) return tab;
-          if (tab.childTabs?.length) {
-            const found = findTab(tab.childTabs, id);
-            if (found) return found;
-          }
-        }
-        return null;
-      }
-      const tab = findTab(doc.tabs, tab_id);
+      const tab = findDocTab(doc.tabs, tab_id);
       if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
       const p = tab.tabProperties;
       lines.push(`[Tab: ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"}]`, "");
-      lines.push(...extractContent(tab.documentTab?.body?.content));
+      lines.push(...extractDocText(tab.documentTab?.body?.content));
     } else {
-      lines.push(...extractContent(doc.body?.content));
+      lines.push(...extractDocText(doc.body?.content));
     }
 
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -86,7 +92,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     match_case: z.boolean().optional().default(false),
   }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, old_text, new_text, match_case = false }) => {
     const { accessToken } = await getCreds();
-    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
       requests: [{
         replaceAllText: {
           containsText: { text: old_text, matchCase: match_case },
@@ -106,7 +112,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     const requests = replacements.map(r => ({
       replaceAllText: { containsText: { text: r.find, matchCase: r.match_case || false }, replaceText: r.replace }
     }));
-    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests }) as any;
+    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests }) as any;
     const counts = (result.replies || []).map((r: any, i: number) =>
       `"${replacements[i].find}" → "${replacements[i].replace}": ${r.replaceAllText?.occurrencesChanged || 0} occurrence(s)`
     );
@@ -129,7 +135,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     } else {
       request = { insertText: { location: { index }, text: "\n---\n" } };
     }
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: [request] });
+    await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [request] });
     return { content: [{ type: "text", text: `${element_type} inserted at index ${index}.` }] };
   }));
 
@@ -142,7 +148,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { requests };
     if (tab_id) body.tabsCriteria = { tabIds: [tab_id] };
-    const result = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", body) as any;
+    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", body) as any;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations executed.` }] };
   }));
 
@@ -165,23 +171,13 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
   }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     const path = tab_id ? "?includeTabsContent=true" : "";
-    const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
+    const doc = await docsRequest(accessToken, document_id, path) as any;
 
     let bodyContent: any[];
     let contextLabel: string;
 
     if (tab_id) {
-      function findTab(tabList: any[], id: string): any | null {
-        for (const tab of tabList) {
-          if (tab.tabProperties?.tabId === id) return tab;
-          if (tab.childTabs?.length) {
-            const found = findTab(tab.childTabs, id);
-            if (found) return found;
-          }
-        }
-        return null;
-      }
-      const tab = findTab(doc.tabs || [], tab_id);
+      const tab = findDocTab(doc.tabs || [], tab_id);
       if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list tabs.` }] };
       bodyContent = tab.documentTab?.body?.content || [];
       contextLabel = `Tab: ${tab.tabProperties?.title ?? tab_id} (index space is independent, starts at 1)`;
@@ -291,12 +287,12 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       const createReq: Record<string, unknown> = target === "header"
         ? { createHeader: { type: section_type } }
         : { createFooter: { type: section_type } };
-      const createResult = await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: [createReq] }) as any;
+      const createResult = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [createReq] }) as any;
       const newId = target === "header"
         ? createResult.replies?.[0]?.createHeader?.headerId
         : createResult.replies?.[0]?.createFooter?.footerId;
       if (newId) {
-        await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+        await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: { segmentId: newId, index: 0 }, text } }]
         });
         return { content: [{ type: "text", text: `${target} created and set to: "${text}"` }] };
@@ -309,7 +305,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     const requests: any[] = [];
     if (endIndex > 1) requests.push({ deleteContentRange: { range: { segmentId: headerId, startIndex: 0, endIndex: endIndex - 1 } } });
     requests.push({ insertText: { location: { segmentId: headerId, index: 0 }, text } });
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+    await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests });
     return { content: [{ type: "text", text: `${target} updated to: "${text}"` }] };
   }));
 
@@ -322,7 +318,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (!data.length || !data[0].length) return { content: [{ type: "text", text: "No data provided." }] };
     const rows = data.length;
     const cols = data[0].length;
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+    await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
       requests: [{ insertTable: { rows, columns: cols, location: { index: insertion_index } } }]
     }) as any;
     const doc = await docsRequest(accessToken, document_id) as any;
@@ -339,7 +335,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       }
     }
     if (insertRequests.length) {
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests: insertRequests });
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: insertRequests });
     }
     return { content: [{ type: "text", text: `Table ${rows}×${cols} created and filled with ${insertRequests.length} cells.` }] };
   }));
@@ -359,7 +355,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     if (title !== undefined) { tabProperties.title = title; fields.push("title"); }
     if (icon_emoji !== undefined) { tabProperties.iconEmoji = icon_emoji; fields.push("iconEmoji"); }
     if (!fields.length) return { content: [{ type: "text", text: "Nothing to update — provide title and/or icon_emoji." }] };
-    await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+    await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
       requests: [{ updateDocumentTabProperties: { tabProperties, fields: fields.join(",") } }]
     });
     const updated = fields.map(f => f === "title" ? `title → "${title}"` : `emoji → "${icon_emoji}"`).join(", ");
@@ -370,7 +366,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     document_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=false") as any;
+    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=false") as any;
     const rootTabs: any[] = doc.tabs || [];
 
     interface TabInfo {
@@ -404,17 +400,9 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
     tab_id: z.string().describe("Tab ID to read (get from get_doc_tabs)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id, "GET", "?includeTabsContent=true") as any;
+    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=true") as any;
 
-    function findTab(tabList: any[], id: string): any | null {
-      for (const tab of tabList) {
-        if (tab.tabProperties?.tabId === id) return tab;
-        if (tab.childTabs?.length) { const found = findTab(tab.childTabs, id); if (found) return found; }
-      }
-      return null;
-    }
-
-    const tab = findTab(doc.tabs || [], tab_id);
+    const tab = findDocTab(doc.tabs || [], tab_id);
     if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
 
     const p = tab.tabProperties;
@@ -462,16 +450,9 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       let baseIndex = index;
       if (baseIndex === undefined) {
         const path = tab_id ? "?includeTabsContent=true" : "";
-        const doc = await docsRequest(accessToken, document_id, "GET", path) as any;
+        const doc = await docsRequest(accessToken, document_id, path) as any;
         if (tab_id) {
-          function findTab(tabList: any[], id: string): any | null {
-            for (const tab of tabList) {
-              if (tab.tabProperties?.tabId === id) return tab;
-              if (tab.childTabs?.length) { const f = findTab(tab.childTabs, id); if (f) return f; }
-            }
-            return null;
-          }
-          const tab = findTab(doc.tabs || [], tab_id);
+          const tab = findDocTab(doc.tabs || [], tab_id);
           if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs.` }] };
           const tabBody = tab.documentTab?.body?.content || [];
           const lastElem = tabBody[tabBody.length - 1];
@@ -505,7 +486,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
         requests.push({ insertText: { location: suffixLoc, text: suffix_text } });
       }
 
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", { requests });
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests });
 
       const displayLabel = name || email;
       const parts: string[] = [`Smart chip inserted for "${displayLabel}" at index ${chipIndex}.`];
@@ -554,7 +535,7 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
       if (!fields.length) return { content: [{ type: "text", text: "No formatting options provided." }] };
       const range: Record<string, unknown> = { startIndex: start_index, endIndex: end_index };
       if (tab_id) range.tabId = tab_id;
-      await docsRequest(accessToken, document_id, "POST", ":batchUpdate", {
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ updateTextStyle: { range, textStyle, fields: fields.join(",") } }],
       });
       return { content: [{ type: "text", text: `Text style applied to range ${start_index}-${end_index}: ${fields.join(", ")}` }] };
