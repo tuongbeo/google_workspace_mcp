@@ -1,0 +1,55 @@
+name: Deploy Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cloudflare-worker/src/**"
+      - "cloudflare-worker/wrangler*.jsonc"
+      - "cloudflare-worker/package.json"
+  workflow_dispatch:          # manual trigger từ GitHub UI
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: cloudflare-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Deploy workspace (full, ~193 tools) ──────────────────────────────
+      - name: Deploy workspace
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # ── Deploy office (Docs/Sheets/Slides/Drive/Forms/AppsScript) ────────
+      - name: Deploy office
+        run: npx wrangler deploy --config wrangler.office.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # ── Deploy plan (Gmail/Calendar/Tasks) ───────────────────────────────
+      - name: Deploy plan
+        run: npx wrangler deploy --config wrangler.plan.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # ── Deploy social (Chat/Contacts) ─────────────────────────────────────
+      - name: Deploy social
+        run: npx wrangler deploy --config wrangler.social.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
