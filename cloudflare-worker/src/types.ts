@@ -13,7 +13,7 @@ export interface OAuthProps {
 }
 
 export interface Env {
-  // ─── Google OAuth 2.0 credentials ─────────────────────────────────────────────
+  // ─── Google OAuth 2.0 credentials (used for token refresh fallback) ───────────
   GOOGLE_OAUTH_CLIENT_ID:     string;
   GOOGLE_OAUTH_CLIENT_SECRET: string;
 
@@ -26,8 +26,8 @@ export interface Env {
   CONFIG_KV: KVNamespace;  // Feature flags, config (optional)
 
   // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
-  GW_SERVER: DurableObjectNamespace;
-  MCP_SERVER?: DurableObjectNamespace;  // used by specialized workers (office/plan/social)
+  GW_SERVER:   DurableObjectNamespace;
+  MCP_SERVER?: DurableObjectNamespace;  // used by office/plan/social workers
 
   // ─── Centralized Auth (google-auth.tuongbeo.workers.dev) ─────────────────────
   GOOGLE_AUTH_BASE_URL:      string;  // https://google-auth.tuongbeo.workers.dev
@@ -42,34 +42,10 @@ export interface StoredTokenRecord {
   access_token:  string;
   refresh_token: string | null;
   expires_at:    number;   // seconds (legacy) or ms (google-auth) — normalized in getValidAccessToken
-  scopes?:       string;   // optional — not stored by google-auth
+  scopes?:       string;
   email?:        string;   // google-auth stores this
   server_name?:  string;   // google-auth stores this
   updated_at?:   number;   // google-auth stores this
-  google_client_id?:     string;
-  google_client_secret?: string;
-}
-
-export interface ProxyJWTPayload {
-  sub: string;
-  iat: number;
-  exp: number;
-}
-
-export interface OAuthStateRecord {
-  clientId:     string;
-  redirectUri:  string;
-  state:        string;
-  codeChallenge: string;
-  googleClientId?: string;
-}
-
-export interface DCRClientRecord {
-  client_id:     string;
-  client_secret: string;
-  redirect_uris: string[];
-  client_name:   string;
-  created_at:    number;
   google_client_id?:     string;
   google_client_secret?: string;
 }
