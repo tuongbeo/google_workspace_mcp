@@ -4,6 +4,11 @@
   "compatibility_date": "2025-09-15",
   "compatibility_flags": ["nodejs_compat"],
 
+  // ── Non-sensitive vars ────────────────────────────────────────────────────────
+  "vars": {
+    "GOOGLE_AUTH_BASE_URL": "https://google-auth.tuongbeo.workers.dev"
+  },
+
   // ── KV Namespaces (shared with workspace worker) ───────────────────────────
   "kv_namespaces": [
     {

@@ -22,12 +22,16 @@ export interface Env {
 
   // ─── Cloudflare KV ─────────────────────────────────────────────────────────────
   OAUTH_KV:  KVNamespace;  // OAuth state (from OAuthProvider)
-  TOKENS_KV: KVNamespace;  // Google access/refresh tokens
+  TOKENS_KV: KVNamespace;  // Google access/refresh tokens (shared with google-auth)
   CONFIG_KV: KVNamespace;  // Feature flags, config (optional)
 
   // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
   GW_SERVER: DurableObjectNamespace;
   MCP_SERVER?: DurableObjectNamespace;  // used by specialized workers (office/plan/social)
+
+  // ─── Centralized Auth (google-auth.tuongbeo.workers.dev) ─────────────────────
+  GOOGLE_AUTH_BASE_URL:      string;  // https://google-auth.tuongbeo.workers.dev
+  GOOGLE_AUTH_SERVICE_TOKEN: string;  // Bearer token for /delegate/verify
 
   // ─── Google Custom Search (optional) ───────────────────────────────────────────
   GOOGLE_PSE_API_KEY?:    string;
@@ -36,9 +40,12 @@ export interface Env {
 
 export interface StoredTokenRecord {
   access_token:  string;
-  refresh_token: string;
-  expires_at:    number;
-  scopes:        string;
+  refresh_token: string | null;
+  expires_at:    number;   // seconds (legacy) or ms (google-auth) — normalized in getValidAccessToken
+  scopes?:       string;   // optional — not stored by google-auth
+  email?:        string;   // google-auth stores this
+  server_name?:  string;   // google-auth stores this
+  updated_at?:   number;   // google-auth stores this
   google_client_id?:     string;
   google_client_secret?: string;
 }

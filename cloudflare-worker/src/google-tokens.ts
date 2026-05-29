@@ -6,7 +6,9 @@
 
 import type { StoredTokenRecord, GetCredsFunc } from "./types";
 
-const KV_TOKEN_PREFIX   = "token:";
+// "tokens:" matches google-auth's TOKENS_PREFIX in auth/delegate.ts
+// Key schema: tokens:{namespace}:{sub}  e.g. tokens:office:12345
+const KV_TOKEN_PREFIX   = "tokens:";
 const KV_LOCK_PREFIX    = "lock:refresh:";
 const KV_TOKEN_TTL      = 90 * 24 * 3600; // 90 days
 const REFRESH_THRESHOLD = 10 * 60;         // refresh if < 10 min remaining
@@ -127,9 +129,15 @@ export async function getValidAccessToken(
   if (!raw) throw new Error(`No Google token for ns=${namespace} sub=${sub}. Re-authenticate.`);
 
   const record = JSON.parse(raw) as StoredTokenRecord;
-  const now    = Math.floor(Date.now() / 1000);
+  const nowSec = Math.floor(Date.now() / 1000);
 
-  if (record.expires_at - now >= REFRESH_THRESHOLD) {
+  // Normalize expires_at: google-auth stores ms (Date.now()), legacy stores seconds.
+  // Values > 1e12 are milliseconds (year 2001 in ms ≈ 9.8e11).
+  const expiresAtSec = record.expires_at > 1e12
+    ? Math.floor(record.expires_at / 1000)
+    : record.expires_at;
+
+  if (expiresAtSec - nowSec >= REFRESH_THRESHOLD) {
     return record.access_token;
   }
 

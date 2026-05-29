@@ -20,15 +20,19 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import type { Env } from "../types";
-import { createGoogleHandler } from "../auth/google";
+import { createDelegatingHandler } from "../auth/google";
 
 interface WorkerConfig {
   /** Short service name, e.g. "mcp-office". Used in /health response. */
   service: string;
   /** The McpAgent subclass to serve at /mcp. Must have a static .serve() method. */
   agent: { serve: (path: string, opts: { binding: string }) => unknown };
-  /** OAuth scopes this worker will request from Google. */
-  scopes: string[];
+  /**
+   * Server name registered in google-auth's mcp_servers table.
+   * Used to route /delegate/authorize correctly.
+   * e.g. "office" | "plan" | "social"
+   */
+  serverName: string;
   /** Token storage namespace, e.g. "office". Must match the agent's makeGetCreds call. */
   namespace: string;
 }
@@ -38,7 +42,7 @@ interface WorkerConfig {
  * Returns an object suitable for `export default`.
  */
 export function createWorker(config: WorkerConfig) {
-  const { service, agent, scopes, namespace } = config;
+  const { service, agent, serverName, namespace } = config;
 
   const router = new Hono<{ Bindings: Env }>();
 
@@ -67,7 +71,7 @@ export function createWorker(config: WorkerConfig) {
   const oauthProvider = new OAuthProvider({
     apiRoute:                   "/mcp",
     apiHandler:                 agent.serve("/mcp", { binding: "MCP_SERVER" }),
-    defaultHandler:             createGoogleHandler(scopes, namespace),
+    defaultHandler:             createDelegatingHandler(serverName),
     authorizeEndpoint:          "/authorize",
     tokenEndpoint:              "/token",
     clientRegistrationEndpoint: "/register",

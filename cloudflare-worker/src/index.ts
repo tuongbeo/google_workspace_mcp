@@ -23,7 +23,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import type { Env } from "./types";
 import { GoogleWorkspaceAgent } from "./mcp-worker";
-import { GoogleHandler } from "./auth/google";
+import { createDelegatingHandler } from "./auth/google";
 
 // ── Tool registry (static — update when tools change) ─────────────────────────
 const TOOL_REGISTRY: string[] = [
@@ -119,7 +119,7 @@ router.get("/.well-known/oauth-protected-resource", (c) => {
 const oauthProvider = new OAuthProvider({
   apiRoute:                    "/mcp",
   apiHandler:                  GoogleWorkspaceAgent.serve("/mcp", { binding: "GW_SERVER" }),
-  defaultHandler:              GoogleHandler,
+  defaultHandler:              createDelegatingHandler("workspace"),
   authorizeEndpoint:           "/authorize",
   tokenEndpoint:               "/token",
   clientRegistrationEndpoint:  "/register",
