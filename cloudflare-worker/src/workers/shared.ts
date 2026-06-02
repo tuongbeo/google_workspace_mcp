@@ -364,28 +364,23 @@ export function withTenantRouting(
         }
 
         if (subPath === "/mcp" || subPath.startsWith("/mcp/")) {
-          // Rewrite /:tenant/mcp → /mcp so OAuthProvider handles auth + MCP correctly.
-          // Then fix the WWW-Authenticate header: OAuthProvider hardcodes the root
-          // resource_metadata URL — we rewrite it to the tenant-specific URL so Claude
-          // discovers /:tenant/.well-known/oauth-protected-resource instead of the root.
           const rewritten = new Request(
             url.origin + "/mcp" + url.search,
             request,
           );
-          console.log(`[tenant/${tenant}] /mcp → rewrite to /mcp`);
+          console.log(`[tenant/${tenant}] /mcp → rewrite to /mcp, method=${request.method}`);
           const response = await base.fetch(rewritten, env, ctx);
+          console.log(`[tenant/${tenant}] base response status=${response.status}`);
 
-          // Only patch WWW-Authenticate on 401 responses (unauthenticated MCP access)
           const wwwAuth = response.headers.get("WWW-Authenticate");
+          console.log(`[tenant/${tenant}] WWW-Authenticate=${wwwAuth?.slice(0,80)}`);
           if (response.status === 401 && wwwAuth) {
-            // Replace the root resource_metadata URL with the tenant-specific one.
-            // OAuthProvider sets: resource_metadata="https://host/.well-known/oauth-protected-resource/mcp"
-            // We want:            resource_metadata="https://host/{tenant}/.well-known/oauth-protected-resource"
             const tenantMetaUrl = `${url.origin}/${tenant}/.well-known/oauth-protected-resource`;
             const patched = wwwAuth.replace(
               /resource_metadata="[^"]*"/,
               `resource_metadata="${tenantMetaUrl}"`,
             );
+            console.log(`[tenant/${tenant}] patched header=${patched.slice(0,80)}`);
             const newHeaders = new Headers(response.headers);
             newHeaders.set("WWW-Authenticate", patched);
             return new Response(response.body, {
