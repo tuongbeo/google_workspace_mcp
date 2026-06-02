@@ -68,6 +68,47 @@ export function createWorker(config: WorkerConfig) {
     });
   });
 
+  // RFC 8414 §3.1 path-suffix style: /.well-known/oauth-authorization-server/:tenant
+  // Claude fetches this URL when issuer = https://host/:tenant (not https://host).
+  // Must be in the base router (not tenantRouter) because path starts with /.well-known/.
+  router.get("/.well-known/oauth-authorization-server/:tenant", (c) => {
+    const tenant = c.req.param("tenant");
+    const origin = new URL(c.req.url).origin;
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({
+      issuer:                                `${origin}/${tenant}`,
+      authorization_endpoint:                `${origin}/${tenant}/authorize`,
+      token_endpoint:                        `${origin}/${tenant}/token`,
+      registration_endpoint:                 `${origin}/${tenant}/register`,
+      scopes_supported:                      ["openid", "email"],
+      response_types_supported:              ["code"],
+      grant_types_supported:                 ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported:      ["S256"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
+  });
+
+  // RFC 8414 §3.1 path-suffix style: /.well-known/openid-configuration/:tenant
+  // Some clients try this as fallback. Return same metadata as oauth-authorization-server.
+  router.get("/.well-known/openid-configuration/:tenant", (c) => {
+    const tenant = c.req.param("tenant");
+    const origin = new URL(c.req.url).origin;
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({
+      issuer:                                `${origin}/${tenant}`,
+      authorization_endpoint:                `${origin}/${tenant}/authorize`,
+      token_endpoint:                        `${origin}/${tenant}/token`,
+      registration_endpoint:                 `${origin}/${tenant}/register`,
+      scopes_supported:                      ["openid", "email"],
+      response_types_supported:              ["code"],
+      grant_types_supported:                 ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported:      ["S256"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
+  });
+
   const oauthProvider = new OAuthProvider({
     apiRoute:                   "/mcp",
     apiHandler:                 agent.serve("/mcp", { binding: "MCP_SERVER" }),
@@ -80,7 +121,10 @@ export function createWorker(config: WorkerConfig) {
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
       const { pathname } = new URL(request.url);
-      if (pathname === "/health" || pathname === "/.well-known/oauth-protected-resource") {
+      if (
+        pathname === "/health" ||
+        pathname.startsWith("/.well-known/")
+      ) {
         return router.fetch(request, env, ctx);
       }
       return oauthProvider.fetch(request, env, ctx);
