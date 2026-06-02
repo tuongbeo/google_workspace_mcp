@@ -19,7 +19,7 @@
 
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
-import type { Env, OAuthProps } from "../types";
+import type { Env } from "../types";
 import { createDelegatingHandler } from "../auth/google";
 
 interface WorkerConfig {
@@ -148,16 +148,40 @@ export function withTenantRouting(
       }
     }
 
-    const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
-    if (!oauthReqInfo.clientId) {
+    if (!clientId) {
       return c.text("Invalid OAuth request — missing client_id", 400);
     }
 
-    // Tenant-scoped state key prevents cross-tenant replay
+    // Capture Claude.ai's full OAuth request params in KV — replayed in callback-delegate.
+    // We store the raw query params (not parsed via OAUTH_PROVIDER which is unavailable
+    // in bypass context) and re-present the full request URL in callback-delegate.
     const stateId = crypto.randomUUID();
+    const oauthParams = {
+      clientId,
+      redirectUri,
+      responseType: url.searchParams.get("response_type") || "code",
+      scope:        url.searchParams.get("scope") || "",
+      state:        url.searchParams.get("state") || "",
+      codeChallenge: url.searchParams.get("code_challenge") || "",
+      codeChallengeMethod: url.searchParams.get("code_challenge_method") || "",
+      // Store full original URL so callback-delegate can reconstruct AuthRequest
+      originalUrl: c.req.url,
+    };
+
+    // Store under non-tenant key — completeAuthorization in callback-delegate
+    // flows through base.fetch() (OAuthProvider), which looks up this key.
+    // Tenant-scoped key (for anti-replay) stored separately below.
     await c.env.OAUTH_KV.put(
-      `delegate_mcp_state:${tenant}:${stateId}`,
-      JSON.stringify(oauthReqInfo),
+      `delegate_mcp_state:${stateId}`,
+      JSON.stringify(oauthParams),
+      { expirationTtl: 600 },
+    );
+
+    // Tenant-scoped sentinel prevents cross-tenant replay:
+    // callback-delegate verifies this exists before proceeding.
+    await c.env.OAUTH_KV.put(
+      `delegate_mcp_state_tenant:${tenant}:${stateId}`,
+      "1",
       { expirationTtl: 600 },
     );
 
@@ -175,11 +199,14 @@ export function withTenantRouting(
   });
 
   // ── GET /:tenant/callback-delegate ← google-auth redirects here ──────────
+  // Strategy: verify anti-replay sentinel, then rewrite to /callback-delegate
+  // and pass through base.fetch() (OAuthProvider), which has OAUTH_PROVIDER binding
+  // injected and calls completeAuthorization correctly.
 
   tenantRouter.get("/:tenant/callback-delegate", async (c) => {
     const tenant       = c.req.param("tenant");
-    const delegateCode = c.req.query("code");
     const stateId      = c.req.query("state");
+    const delegateCode = c.req.query("code");
     const error        = c.req.query("error");
 
     if (error) {
@@ -189,48 +216,25 @@ export function withTenantRouting(
       return c.html(tenantErrorPage("Missing code or state from google-auth."), 400);
     }
 
-    // Restore Claude.ai's original OAuth request (tenant-scoped key)
-    const savedState = await c.env.OAUTH_KV.get(`delegate_mcp_state:${tenant}:${stateId}`);
-    if (!savedState) {
-      return c.html(tenantErrorPage("OAuth state expired. Please reconnect."), 400);
+    // Anti-replay: verify this state belongs to this tenant (not another tenant's state)
+    const sentinelKey = `delegate_mcp_state_tenant:${tenant}:${stateId}`;
+    const sentinel    = await c.env.OAUTH_KV.get(sentinelKey);
+    if (!sentinel) {
+      return c.html(tenantErrorPage("OAuth state expired or tenant mismatch. Please reconnect."), 400);
     }
-    const oauthReqInfo = JSON.parse(savedState);
-    await c.env.OAUTH_KV.delete(`delegate_mcp_state:${tenant}:${stateId}`);
+    // Delete sentinel — one-time use
+    await c.env.OAUTH_KV.delete(sentinelKey);
 
-    // Verify one-time code with google-auth → get {sub, email, role}
-    let verifyResult: { sub: string; email: string; role: string };
-    try {
-      const res = await fetch(`${c.env.GOOGLE_AUTH_BASE_URL}/delegate/verify`, {
-        method:  "POST",
-        headers: {
-          "Content-Type":  "application/json",
-          "Authorization": `Bearer ${c.env.GOOGLE_AUTH_SERVICE_TOKEN}`,
-        },
-        body: JSON.stringify({ code: delegateCode }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        console.error(`[tenant/${tenant}] verify failed ${res.status}: ${body}`);
-        return c.html(tenantErrorPage(`Auth verification failed (${res.status}). Please reconnect.`), 400);
-      }
-      verifyResult = await res.json() as { sub: string; email: string; role: string };
-    } catch (err) {
-      console.error(`[tenant/${tenant}] verify network error:`, err);
-      return c.html(tenantErrorPage("Could not reach auth server. Please try again."), 502);
-    }
+    // Rewrite /:tenant/callback-delegate → /callback-delegate and pass through
+    // base.fetch() so OAuthProvider injects OAUTH_PROVIDER binding and
+    // createDelegatingHandler can call completeAuthorization.
+    const url      = new URL(c.req.url);
+    const rewritten = new URL(url.origin + "/callback-delegate");
+    rewritten.searchParams.set("code",  delegateCode);
+    rewritten.searchParams.set("state", stateId);
 
-    const { sub, email } = verifyResult;
-    console.log(`[tenant/${tenant}] verify OK sub=${sub} email=${email}`);
-
-    const props: OAuthProps = { google_sub: sub, email };
-    const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-      request: oauthReqInfo,
-      userId:  sub,
-      scope:   oauthReqInfo.scope,
-      props,
-    });
-
-    return c.redirect(redirectTo);
+    console.log(`[tenant/${tenant}] callback-delegate → rewrite to /callback-delegate state=${stateId}`);
+    return base.fetch(new Request(rewritten.toString(), c.req.raw), c.env, c.executionCtx);
   });
 
   // ── Fetch dispatcher ──────────────────────────────────────────────────────
