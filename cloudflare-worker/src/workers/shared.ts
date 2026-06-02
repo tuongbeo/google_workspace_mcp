@@ -320,13 +320,37 @@ export function withTenantRouting(
         }
 
         if (subPath === "/mcp" || subPath.startsWith("/mcp/")) {
-          // Rewrite /:tenant/mcp → /mcp so OAuthProvider handles auth + MCP correctly
+          // Rewrite /:tenant/mcp → /mcp so OAuthProvider handles auth + MCP correctly.
+          // Then fix the WWW-Authenticate header: OAuthProvider hardcodes the root
+          // resource_metadata URL — we rewrite it to the tenant-specific URL so Claude
+          // discovers /:tenant/.well-known/oauth-protected-resource instead of the root.
           const rewritten = new Request(
             url.origin + "/mcp" + url.search,
             request,
           );
           console.log(`[tenant/${tenant}] /mcp → rewrite to /mcp`);
-          return base.fetch(rewritten, env, ctx);
+          const response = await base.fetch(rewritten, env, ctx);
+
+          // Only patch WWW-Authenticate on 401 responses (unauthenticated MCP access)
+          const wwwAuth = response.headers.get("WWW-Authenticate");
+          if (response.status === 401 && wwwAuth) {
+            // Replace the root resource_metadata URL with the tenant-specific one.
+            // OAuthProvider sets: resource_metadata="https://host/.well-known/oauth-protected-resource/mcp"
+            // We want:            resource_metadata="https://host/{tenant}/.well-known/oauth-protected-resource"
+            const tenantMetaUrl = `${url.origin}/${tenant}/.well-known/oauth-protected-resource`;
+            const patched = wwwAuth.replace(
+              /resource_metadata="[^"]*"/,
+              `resource_metadata="${tenantMetaUrl}"`,
+            );
+            const newHeaders = new Headers(response.headers);
+            newHeaders.set("WWW-Authenticate", patched);
+            return new Response(response.body, {
+              status:     response.status,
+              statusText: response.statusText,
+              headers:    newHeaders,
+            });
+          }
+          return response;
         }
       }
 
