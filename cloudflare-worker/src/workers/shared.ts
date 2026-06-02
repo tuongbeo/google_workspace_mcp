@@ -121,9 +121,66 @@ export function withTenantRouting(
 ): { fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> } {
   const { serverName } = config;
 
-  // Tenant router handles /:tenant/authorize and /:tenant/callback-delegate.
-  // These bypass OAuthProvider — they are Google OAuth flows, not MCP flows.
+  // Tenant router handles /:tenant/authorize, /:tenant/callback-delegate,
+  // and /:tenant/.well-known/* (OAuth discovery for tenant-specific auth).
+  // All bypass OAuthProvider — they are not MCP OAuth flows.
   const tenantRouter = new Hono<{ Bindings: Env }>();
+
+  // ── GET /:tenant/.well-known/oauth-protected-resource ─────────────────────
+  // RFC 9728 resource discovery — tells Claude which authorization server to use.
+  // Claude fetches this to discover /:tenant/authorize endpoint.
+
+  tenantRouter.get("/:tenant/.well-known/oauth-protected-resource", (c) => {
+    const tenant = c.req.param("tenant");
+    const base   = new URL(c.req.url).origin;
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({
+      resource:                 `${base}/${tenant}/mcp`,
+      authorization_servers:    [`${base}/${tenant}`],
+      scopes_supported:         ["openid", "email"],
+      bearer_methods_supported: ["header"],
+    });
+  });
+
+  // ── GET /:tenant/.well-known/oauth-authorization-server ───────────────────
+  // OAuth 2.0 Authorization Server Metadata (RFC 8414) — Claude reads this
+  // to discover authorize/token/register endpoints for this tenant.
+
+  tenantRouter.get("/:tenant/.well-known/oauth-authorization-server", (c) => {
+    const tenant = c.req.param("tenant");
+    const base   = new URL(c.req.url).origin;
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({
+      issuer:                                `${base}/${tenant}`,
+      authorization_endpoint:                `${base}/${tenant}/authorize`,
+      token_endpoint:                        `${base}/${tenant}/token`,
+      registration_endpoint:                 `${base}/${tenant}/register`,
+      scopes_supported:                      ["openid", "email"],
+      response_types_supported:              ["code"],
+      grant_types_supported:                 ["authorization_code", "refresh_token"],
+      code_challenge_methods_supported:      ["S256"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
+  });
+
+  // ── GET /:tenant/token — proxy to base /token (OAuthProvider handles it) ──
+  // Claude POSTs to /:tenant/token after getting the code — rewrite to /token.
+
+  tenantRouter.post("/:tenant/token", async (c) => {
+    const url       = new URL(c.req.url);
+    const rewritten = new Request(url.origin + "/token" + url.search, c.req.raw);
+    return base.fetch(rewritten, c.env, c.executionCtx);
+  });
+
+  // ── GET /:tenant/register — proxy to base /register ───────────────────────
+
+  tenantRouter.post("/:tenant/register", async (c) => {
+    const url       = new URL(c.req.url);
+    const rewritten = new Request(url.origin + "/register" + url.search, c.req.raw);
+    return base.fetch(rewritten, c.env, c.executionCtx);
+  });
 
   // ── GET /:tenant/authorize → delegate to google-auth ─────────────────────
 
@@ -245,12 +302,20 @@ export function withTenantRouting(
       const segments = url.pathname.split("/").filter(Boolean); // ['tenant', 'mcp']
 
       // Check if first path segment looks like a tenant slug
-      if (segments.length >= 2 && isTenantPath(segments[0])) {
-        const tenant   = segments[0];
-        const subPath  = "/" + segments.slice(1).join("/"); // '/mcp', '/authorize', etc.
+      if (segments.length >= 1 && isTenantPath(segments[0])) {
+        const tenant  = segments[0];
+        const subPath = segments.length >= 2
+          ? "/" + segments.slice(1).join("/")
+          : "/";
 
-        if (subPath === "/authorize" || subPath.startsWith("/callback-delegate")) {
-          // Bypass OAuthProvider — these are Google OAuth flows, not MCP flows
+        // Discovery + token + register: all bypass OAuthProvider, handled by tenantRouter
+        if (
+          subPath.startsWith("/.well-known/") ||
+          (subPath === "/token"    && request.method === "POST") ||
+          (subPath === "/register" && request.method === "POST") ||
+          subPath === "/authorize" ||
+          subPath.startsWith("/callback-delegate")
+        ) {
           return tenantRouter.fetch(request, env, ctx);
         }
 
@@ -265,7 +330,7 @@ export function withTenantRouting(
         }
       }
 
-      // All other paths (including /health, /mcp, /authorize, /callback-delegate) → base worker
+      // All other paths → base worker
       return base.fetch(request, env, ctx);
     },
   };
