@@ -138,11 +138,11 @@ export function Navbar() {
         <a href="/" className="navbar-logo">
           <div className="logo-icon">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 1L15 5V11L8 15L1 11V5L8 1Z" stroke="white" strokeWidth="1.5" fill="none"/>
-              <circle cx="8" cy="8" r="2.5" fill="white"/>
+              <path d="M3 8 L8 3 L13 8 L8 13 Z" stroke="white" strokeWidth="1.5" fill="none"/>
+              <circle cx="8" cy="8" r="2" fill="white"/>
             </svg>
           </div>
-          Workspace MCP
+          Workspace Lens
         </a>
         <ul className="navbar-links">
           <li><a href="#features">Features</a></li>
@@ -161,7 +161,7 @@ export function Footer() {
     <footer className="footer">
       <div className="container footer-inner">
         <div className="footer-left">
-          <span>© 2026 Workspace MCP</span>
+          <span>© 2026 Workspace Lens</span>
           <span style={{ color: 'var(--border-strong)' }}>·</span>
           <span>Not affiliated with Google LLC</span>
         </div>

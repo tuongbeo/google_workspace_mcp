@@ -10,7 +10,7 @@ export default function PrivacyPage() {
         <p className="legal-date">Last updated: June 3, 2026</p>
 
         <p>
-          This Privacy Policy describes how the Google Workspace MCP server ("Service", "we", "our")
+          This Privacy Policy describes how Workspace Lens ("Service", "we", "our")
           collects, uses, and stores information when you use the Service to connect Claude with
           your Google Workspace account.
         </p>

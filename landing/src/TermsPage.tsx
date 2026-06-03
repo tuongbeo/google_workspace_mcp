@@ -10,7 +10,7 @@ export default function TermsPage() {
         <p className="legal-date">Last updated: June 3, 2026</p>
 
         <p>
-          Please read these Terms of Service ("Terms") carefully before using the Google Workspace MCP
+          Please read these Terms of Service ("Terms") carefully before using Workspace Lens
           server ("Service"). By connecting the Service to your Claude.ai account, you agree to be
           bound by these Terms.
         </p>
