@@ -8,6 +8,8 @@
   "vars": {
     "GOOGLE_AUTH_BASE_URL": "https://auth.lens.io.vn",
     "PUBLIC_BASE_URL":      "https://office.lens.io.vn",
+    // all = Docs + Sheets + Slides + Drive + Forms + Script + Tasks
+    //     + Gmail + Calendar + Chat + Contacts + Search
     "TOOLS_PRESET":         "all"
   },
 
