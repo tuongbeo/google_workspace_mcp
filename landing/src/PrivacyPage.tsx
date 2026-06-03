@@ -34,7 +34,9 @@ export default function PrivacyPage() {
           <li><code>https://www.googleapis.com/auth/forms.body</code> — Create and edit Google Forms</li>
           <li><code>https://www.googleapis.com/auth/script.projects</code> — Manage Apps Script projects</li>
           <li><code>https://www.googleapis.com/auth/script.deployments</code> — Manage Apps Script deployments</li>
+          <li><code>https://www.googleapis.com/auth/script.metrics</code> — View Apps Script execution metrics</li>
           <li><code>https://www.googleapis.com/auth/tasks</code> — Manage Google Tasks</li>
+          <li><code>https://www.googleapis.com/auth/contacts</code> — Read, create, and update Google Contacts</li>
           <li><code>openid</code>, <code>email</code>, <code>profile</code> — Identify your account</li>
         </ul>
         <p>These scopes are used exclusively to execute tool calls that you initiate through Claude. The Service does not access your data autonomously or in the background.</p>
