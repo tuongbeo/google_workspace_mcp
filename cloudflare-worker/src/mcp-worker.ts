@@ -15,7 +15,7 @@ import type { Env, OAuthProps } from "./types";
 import { makeGetCreds } from "./google-tokens";
 import { registerGmailTools } from "./tools/gmail";
 import { registerCalendarTools } from "./tools/calendar";
-import { registerDriveTools } from "./tools/drive";
+import { registerDriveTools, registerDriveSearchTools } from "./tools/drive";
 import { registerDocsTools } from "./tools/docs";
 import { registerSheetsTools } from "./tools/sheets";
 import { registerSlidesTools } from "./tools/slides";
@@ -44,6 +44,7 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
     registerGmailTools(this.server, getCreds);
     registerCalendarTools(this.server, getCreds);
     registerDriveTools(this.server, getCreds);
+    registerDriveSearchTools(this.server, getCreds);
     registerDocsTools(this.server, getCreds);
     registerSheetsTools(this.server, getCreds);
     registerSlidesTools(this.server, getCreds);

@@ -86,25 +86,6 @@ function markdownToHtml(md: string): string {
 
 function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
 
-  server.tool("list_drive_files", "List files and folders in Google Drive.", {
-    query: z.string().optional(),
-    page_size: z.number().optional().default(20),
-    page_token: z.string().optional(),
-    folder_id: z.string().optional(),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 20, page_token, folder_id }) => {
-    const { accessToken } = await getCreds();
-    const params = new URLSearchParams({ fields: "files(id,name,mimeType,size,modifiedTime,webViewLink,parents),nextPageToken", pageSize: String(Math.min(page_size, 100)) });
-    let q = query || "";
-    if (folder_id) q = (q ? `(${q}) and ` : "") + `'${folder_id}' in parents`;
-    if (q) params.set("q", q);
-    if (page_token) params.set("pageToken", page_token);
-    const data = await driveRequest(accessToken, `/files?${params}`) as any;
-    const files = data.files || [];
-    if (!files.length) return { content: [{ type: "text", text: "No files found." }] };
-    const lines = files.map((f: any) => `📄 ${f.name} (${f.mimeType.split(".").pop()})\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink || "N/A"}`);
-    if (data.nextPageToken) lines.push(`\nNext page: ${data.nextPageToken}`);
-    return { content: [{ type: "text", text: lines.join("\n\n") }] };
-  }));
 
   server.tool("get_drive_file", "Get metadata of a specific Drive file.", {
     file_id: z.string(),
@@ -116,23 +97,6 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
 
-  server.tool("search_drive_files", "Search files in Google Drive.", {
-    query: z.string(),
-    file_type: z.enum(["any", "document", "spreadsheet", "presentation", "pdf", "folder"]).optional().default("any"),
-    max_results: z.number().optional().default(10),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ query, file_type = "any", max_results = 10 }) => {
-    const { accessToken } = await getCreds();
-    const mimeMap: Record<string, string> = { document: "application/vnd.google-apps.document", spreadsheet: "application/vnd.google-apps.spreadsheet", presentation: "application/vnd.google-apps.presentation", pdf: "application/pdf", folder: "application/vnd.google-apps.folder" };
-    let q = `name contains '${query.replace(/'/g, "\\'")}'`;
-    if (file_type !== "any") q += ` and mimeType='${mimeMap[file_type]}'`;
-    q += " and trashed=false";
-    const params = new URLSearchParams({ q, fields: "files(id,name,mimeType,modifiedTime,webViewLink)", pageSize: String(max_results) });
-    const data = await driveRequest(accessToken, `/files?${params}`) as any;
-    const files = data.files || [];
-    if (!files.length) return { content: [{ type: "text", text: `No files for: "${query}"` }] };
-    const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Link: ${f.webViewLink || "N/A"}`);
-    return { content: [{ type: "text", text: `Found ${files.length} files:\n\n${lines.join("\n\n")}` }] };
-  }));
 
   server.tool("get_drive_file_content", "Read the text content of a Google Drive file (Docs, Sheets as CSV, plain text files).", {
     file_id: z.string(),
@@ -669,9 +633,56 @@ function _registerDriveConsolidated(server: McpServer, getCreds: GetCredsFunc): 
     );
 }
 
+
+// ── Drive search tools (require drive.readonly scope) ─────────────────────────
+
+function _registerDriveSearch(server: McpServer, getCreds: GetCredsFunc): void {
+  server.tool("list_drive_files", "List files and folders in Google Drive. Note: requires drive.readonly scope — with drive.file scope, only files created by this app are visible.", {
+    query: z.string().optional(),
+    page_size: z.number().optional().default(20),
+    page_token: z.string().optional(),
+    folder_id: z.string().optional(),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 20, page_token, folder_id }) => {
+    const { accessToken } = await getCreds();
+    const params = new URLSearchParams({ fields: "files(id,name,mimeType,size,modifiedTime,webViewLink,parents),nextPageToken", pageSize: String(Math.min(page_size, 100)) });
+    let q = query || "";
+    if (folder_id) q = (q ? `(${q}) and ` : "") + `'${folder_id}' in parents`;
+    if (q) params.set("q", q);
+    if (page_token) params.set("pageToken", page_token);
+    const data = await driveRequest(accessToken, `/files?${params}`) as any;
+    const files = data.files || [];
+    if (!files.length) return { content: [{ type: "text", text: "No files found." }] };
+    const lines = files.map((f: any) => `📄 ${f.name} (${f.mimeType.split(".").pop()})\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink || "N/A"}`);
+    if (data.nextPageToken) lines.push(`\nNext page: ${data.nextPageToken}`);
+    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+  }));
+
+  server.tool("search_drive_files", "Search files in Google Drive. Note: requires drive.readonly scope — with drive.file scope, only files created by this app are visible.", {
+    query: z.string(),
+    file_type: z.enum(["any", "document", "spreadsheet", "presentation", "pdf", "folder"]).optional().default("any"),
+    max_results: z.number().optional().default(10),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ query, file_type = "any", max_results = 10 }) => {
+    const { accessToken } = await getCreds();
+    const mimeMap: Record<string, string> = { document: "application/vnd.google-apps.document", spreadsheet: "application/vnd.google-apps.spreadsheet", presentation: "application/vnd.google-apps.presentation", pdf: "application/pdf", folder: "application/vnd.google-apps.folder" };
+    let q = `name contains '${query.replace(/'/g, "\\'")}'`;
+    if (file_type !== "any") q += ` and mimeType='${mimeMap[file_type]}'`;
+    q += " and trashed=false";
+    const params = new URLSearchParams({ q, fields: "files(id,name,mimeType,modifiedTime,webViewLink)", pageSize: String(max_results) });
+    const data = await driveRequest(accessToken, `/files?${params}`) as any;
+    const files = data.files || [];
+    if (!files.length) return { content: [{ type: "text", text: `No files for: "${query}"` }] };
+    const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Link: ${f.webViewLink || "N/A"}`);
+    return { content: [{ type: "text", text: `Found ${files.length} files:\n\n${lines.join("\n\n")}` }] };
+  }));
+}
+
 // ── Unified entry point ───────────────────────────────────────────────────────
 
-/** Compatible with drive.file scope (files created by this app only). */
+/**
+ * Register Drive tools compatible with drive.file scope.
+ * Use in office-agent (public). Files must have been created by this app
+ * for get/read/update operations to succeed.
+ */
 export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc): void {
   _registerDriveCore(server, getCreds);
   _registerDriveExtra(server, getCreds);
@@ -679,8 +690,11 @@ export function registerDriveTools(server: McpServer, getCreds: GetCredsFunc): v
   _registerDriveConsolidated(server, getCreds);
 }
 
-/** Requires drive or drive.readonly scope. Only register in workspace agent. */
-export function registerDriveFullTools(server: McpServer, getCreds: GetCredsFunc): void {
-  // list_recent_files, search_drive_files, list_drive_files are registered via registerDriveExtra
-  // This function exists for future tools that need full drive scope
+/**
+ * Register Drive tools that require drive or drive.readonly scope.
+ * Use in workspace-agent (personal) only.
+ * Includes list_drive_files and search_drive_files.
+ */
+export function registerDriveSearchTools(server: McpServer, getCreds: GetCredsFunc): void {
+  _registerDriveSearch(server, getCreds);
 }

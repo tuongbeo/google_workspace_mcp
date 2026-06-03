@@ -6,40 +6,27 @@
 
   // ── Non-sensitive vars ────────────────────────────────────────────────────────
   "vars": {
-    "GOOGLE_AUTH_BASE_URL": "https://google-auth.tuongbeo.workers.dev"
+    "GOOGLE_AUTH_BASE_URL": "https://google-auth.tuongbeo.workers.dev",
+    "PUBLIC_BASE_URL":      "https://office.lens.io.vn",
+    "TOOLS_PRESET":         "all"
   },
 
   // ── KV Namespaces (shared with workspace worker) ───────────────────────────
   "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV",
-      "id": "e51d896daf1f46019c04627a38beac8b"
-    },
-    {
-      "binding": "TOKENS_KV",
-      "id": "f57a70d271024b669640803bd4a9a2a1"
-    },
-    {
-      "binding": "CONFIG_KV",
-      "id": "78cc72f93f34486dab1ff1a3fd5ecd81"
-    }
+    { "binding": "OAUTH_KV",  "id": "e51d896daf1f46019c04627a38beac8b" },
+    { "binding": "TOKENS_KV", "id": "f57a70d271024b669640803bd4a9a2a1" },
+    { "binding": "CONFIG_KV", "id": "78cc72f93f34486dab1ff1a3fd5ecd81" }
   ],
 
   // ── Durable Object (OfficeAgent) ──────────────────────────────────────────
   "durable_objects": {
     "bindings": [
-      {
-        "name": "MCP_SERVER",
-        "class_name": "OfficeAgent"
-      }
+      { "name": "MCP_SERVER", "class_name": "OfficeAgent" }
     ]
   },
 
   // ── DO Migration ──────────────────────────────────────────────────────────
   "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["OfficeAgent"]
-    }
+    { "tag": "v1", "new_sqlite_classes": ["OfficeAgent"] }
   ]
 }
