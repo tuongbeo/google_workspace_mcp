@@ -1,27 +1,31 @@
 :root {
   /* Typography */
-  --font-display: 'Sora', sans-serif;
-  --font-body: 'DM Sans', sans-serif;
+  --font-display: 'Plus Jakarta Sans', sans-serif;
+  --font-body: 'Plus Jakarta Sans', sans-serif;
 
   /* Colors */
   --white: #ffffff;
-  --off-white: #f8f9fa;
-  --surface: #f1f3f5;
-  --border: #e2e5e9;
-  --border-strong: #c8cdd4;
-  --text-primary: #0f1117;
-  --text-secondary: #4a5360;
-  --text-muted: #8892a0;
+  --off-white: #f8fafc;
+  --surface: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
 
-  /* Google brand accents */
-  --blue: #1a73e8;
-  --blue-light: #e8f0fe;
-  --blue-hover: #1557b0;
-  --green: #1e8e3e;
-  --green-light: #e6f4ea;
-  --red: #d93025;
-  --yellow: #f9ab00;
-  --yellow-light: #fef7e0;
+  /* Workspace Lens brand */
+  --blue: #3B82F6;
+  --blue-light: #eff6ff;
+  --blue-hover: #2563eb;
+  --green: #10B981;
+  --green-light: #ecfdf5;
+  --green-hover: #059669;
+  --navy: #0f172a;
+
+  /* Legacy (kept for compatibility) */
+  --red: #ef4444;
+  --yellow: #f59e0b;
+  --yellow-light: #fffbeb;
 
   /* Spacing */
   --radius: 10px;
@@ -157,7 +161,7 @@ img, svg { display: block; }
   top: -60px; left: 50%;
   transform: translateX(-50%);
   width: 900px; height: 500px;
-  background: radial-gradient(ellipse at center, #e8f0fe 0%, transparent 70%);
+  background: radial-gradient(ellipse at center, #eff6ff 0%, transparent 70%);
   pointer-events: none;
 }
 
@@ -169,7 +173,7 @@ img, svg { display: block; }
   font-weight: 600;
   color: var(--blue);
   background: var(--blue-light);
-  border: 1px solid #c5d8fb;
+  border: 1px solid #bfdbfe;
   padding: 5px 12px;
   border-radius: var(--radius-pill);
   margin-bottom: 28px;
