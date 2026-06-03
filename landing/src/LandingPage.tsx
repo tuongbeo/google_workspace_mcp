@@ -19,7 +19,7 @@ export default function LandingPage() {
             <em>understood by Claude</em>
           </h1>
           <p className="hero-subtitle anim-fade-up anim-delay-2">
-            Connect Claude to Docs, Sheets, Slides, Drive, Forms, Apps Script, Tasks, and Contacts.
+            Connect Claude to Docs, Sheets, Slides, Drive, Forms, Apps Script, and Tasks.
             Read and write your files through natural conversation.
           </p>
 
