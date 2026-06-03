@@ -98,10 +98,15 @@ const SKIP_DRIVE = new Set([
   "get_drive_file_download_url",  // requires drive.readonly scope (incompatible)
   "list_drive_files",             // requires drive.readonly scope (incompatible)
   "search_drive_files",           // requires drive.readonly scope (incompatible)
+  "check_drive_file_public_access", // reads permissions on arbitrary files → requires drive.readonly
 ]);
 
 // AppsScript — skip individual tools duplicated by consolidated manage_* tools
+// + skip list_script_projects: it queries Drive API to enumerate scripts,
+//   which with drive.file scope only returns scripts created by this app
+//   (not user's existing scripts) → misleading empty results.
 const SKIP_APPSSCRIPT = new Set([
+  "list_script_projects",         // uses Drive API; drive.file scope → only app-created files visible
   "list_script_deployments",      // duplicate of manage_script_deployments action=list
   "create_script_deployment",     // duplicate of manage_script_deployments action=create
   "update_script_deployment",     // duplicate of manage_script_deployments action=update
