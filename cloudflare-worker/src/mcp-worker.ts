@@ -13,32 +13,19 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env, OAuthProps } from "./types";
 import { makeGetCreds } from "./google-tokens";
-import { registerGmailTools, registerGmailExtraTools } from "./tools/gmail";
+import { registerGmailTools } from "./tools/gmail";
 import { registerCalendarTools } from "./tools/calendar";
-import { registerDriveTools, registerDriveExtraTools } from "./tools/drive";
-import { registerDocsTools, registerDocsExtraTools } from "./tools/docs";
-import { registerSheetsTools, registerSheetsExtraTools } from "./tools/sheets";
-import { registerContactsTools, registerContactsExtraTools } from "./tools/contacts";
-import { registerAppsScriptTools, registerAppsScriptExtraTools } from "./tools/appsscript";
+import { registerDriveTools } from "./tools/drive";
+import { registerDocsTools } from "./tools/docs";
+import { registerSheetsTools } from "./tools/sheets";
+import { registerSlidesTools } from "./tools/slides";
+import { registerChatTools } from "./tools/chat";
+import { registerTasksTools } from "./tools/tasks";
+import { registerFormsTools } from "./tools/forms";
+import { registerContactsTools } from "./tools/contacts";
+import { registerAppsScriptTools } from "./tools/appsscript";
 import { registerSearchTools } from "./tools/search";
-import { registerSlidesExtendedTools } from "./tools/slides";
-import { registerDocsAdvancedTools } from "./tools/docs-advanced";
-import { registerDriveRevisionsTools } from "./tools/drive-revisions";
 import { registerCompositeTools } from "./tools/composite";
-import { registerSheetsPhase2Tools } from "./tools/sheets-phase2";
-import { registerDocsPhase2Tools } from "./tools/docs-phase2";
-import { registerSlidesPhase2Tools } from "./tools/slides-phase2";
-import { registerAppsScriptPhase2Tools } from "./tools/appsscript-phase2";
-import { registerConsolidatedTools } from "./tools/consolidated";
-import { registerWriteGoogleDocTool } from "./tools/write-google-doc";
-import { registerWriteGoogleSheetTool } from "./tools/write-google-sheet";
-import {
-  registerSlidesTools,
-  registerChatTools,
-  registerTasksTools,
-  registerFormsTools,
-  registerWorkspaceExtraTools,
-} from "./tools/workspace";
 
 export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, OAuthProps> {
   server = new McpServer({
@@ -50,41 +37,22 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
 
   async init() {
     const sub = this.props.google_sub;
-
     console.log(`[agent] init for sub=${sub}, email=${this.props.email}`);
 
     const getCreds = makeGetCreds(sub, this.env);
 
-    // getCreds is called lazily by each tool handler (fetches/refreshes token on demand)
     registerGmailTools(this.server, getCreds);
-    registerGmailExtraTools(this.server, getCreds);
     registerCalendarTools(this.server, getCreds);
     registerDriveTools(this.server, getCreds);
-    registerDriveExtraTools(this.server, getCreds);
     registerDocsTools(this.server, getCreds);
-    registerDocsExtraTools(this.server, getCreds);
     registerSheetsTools(this.server, getCreds);
-    registerSheetsExtraTools(this.server, getCreds);
     registerSlidesTools(this.server, getCreds);
-    registerSlidesExtendedTools(this.server, getCreds);
     registerChatTools(this.server, getCreds);
     registerTasksTools(this.server, getCreds);
     registerFormsTools(this.server, getCreds);
     registerContactsTools(this.server, getCreds);
-    registerContactsExtraTools(this.server, getCreds);
     registerAppsScriptTools(this.server, getCreds);
-    registerAppsScriptExtraTools(this.server, getCreds);
     registerSearchTools(this.server, getCreds, this.env);
-    registerWorkspaceExtraTools(this.server, getCreds);
-    registerDocsAdvancedTools(this.server, getCreds);
-    registerDriveRevisionsTools(this.server, getCreds);
     registerCompositeTools(this.server, getCreds);
-    registerSheetsPhase2Tools(this.server, getCreds);
-    registerDocsPhase2Tools(this.server, getCreds);
-    registerSlidesPhase2Tools(this.server, getCreds);
-    registerAppsScriptPhase2Tools(this.server, getCreds);
-    registerConsolidatedTools(this.server, getCreds);
-    registerWriteGoogleDocTool(this.server, getCreds);
-    registerWriteGoogleSheetTool(this.server, getCreds);
   }
 }

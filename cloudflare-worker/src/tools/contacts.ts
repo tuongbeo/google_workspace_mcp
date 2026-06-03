@@ -11,7 +11,7 @@ import type { GetCredsFunc } from "../types";
 const PEOPLE_BASE = "https://people.googleapis.com/v1";
 const FIELDS = "names,emailAddresses,phoneNumbers,organizations,addresses,biographies,birthdays,resourceName";
 
-export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_contacts", "List Google Contacts.", {
     page_size: z.number().optional().default(20),
@@ -178,7 +178,7 @@ function formatContact(c: any): string {
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
 
-export function registerContactsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("manage_contacts_batch", "Batch create, update, or delete multiple contacts at once.", {
     action: z.enum(["create", "update", "delete"]),
     contacts: z.array(z.object({
@@ -233,4 +233,72 @@ export function registerContactsExtraTools(server: McpServer, getCreds: GetCreds
 
     return { content: [{ type: "text", text: `Batch ${action} results:\n${results.join("\n")}` }] };
   }));
+}
+
+// ── manage_contact_groups (consolidated) ─────────────────────────────────────
+function _registerContactGroupsConsolidated(server: McpServer, getCreds: GetCredsFunc): void {
+  // ── manage_contact_groups ───────────────────────────────────────────────────
+  
+    server.tool("manage_contact_groups",
+      "Create, get, delete, list, or modify members of Google Contact groups (labels). Actions: create | get | delete | list | modify_members.",
+      {
+        action:          z.enum(["create","get","delete","list","modify_members"]),
+        group_resource_name: z.string().optional().describe("contactGroups/... (get/delete/modify_members)"),
+        name:            z.string().optional().describe("Group name (create)"),
+        max_members:     z.number().int().optional().describe("Max members to return with get"),
+        add_member_resource_names:    z.array(z.string()).optional().describe("people/... to add"),
+        remove_member_resource_names: z.array(z.string()).optional().describe("people/... to remove"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, group_resource_name, name, max_members = 100, add_member_resource_names, remove_member_resource_names }) => {
+        const { accessToken } = await getCreds();
+        const base = "https://people.googleapis.com/v1/contactGroups";
+  
+        if (action === "list") {
+          const data = await googleFetch(`${base}?pageSize=50&groupFields=name,memberCount,groupType`, accessToken) as any;
+          const groups = data.contactGroups || [];
+          const lines = groups.map((g: any) => `${g.resourceName} | ${g.name} | Members: ${g.memberCount ?? "?"} | Type: ${g.groupType}`);
+          return { content: [{ type: "text", text: lines.join("\n") || "No groups." }] };
+        }
+  
+        if (action === "create") {
+          if (!name) throw new Error("name required");
+          const res = await googleFetch(base, accessToken, "POST", { contactGroup: { name } }) as any;
+          return { content: [{ type: "text", text: `Group created: "${res.name}" | ${res.resourceName}` }] };
+        }
+  
+        if (action === "get") {
+          if (!group_resource_name) throw new Error("group_resource_name required");
+          const res = await googleFetch(`${base}/${group_resource_name.replace("contactGroups/","")}?maxMembers=${max_members}`, accessToken) as any;
+          const members = (res.memberResourceNames || []).join(", ");
+          return { content: [{ type: "text", text: `${res.name} (${res.resourceName})\nMembers (${res.memberCount ?? 0}): ${members || "(none)"}` }] };
+        }
+  
+        if (action === "delete") {
+          if (!group_resource_name) throw new Error("group_resource_name required");
+          await googleFetch(`${base}/${group_resource_name.replace("contactGroups/","")}`, accessToken, "DELETE");
+          return { content: [{ type: "text", text: `Group ${group_resource_name} deleted.` }] };
+        }
+  
+        if (action === "modify_members") {
+          if (!group_resource_name) throw new Error("group_resource_name required");
+          const body: any = {};
+          if (add_member_resource_names?.length) body.resourceNamesToAdd = add_member_resource_names;
+          if (remove_member_resource_names?.length) body.resourceNamesToRemove = remove_member_resource_names;
+          await googleFetch(`${base}/${group_resource_name.replace("contactGroups/","")}/members:modify`, accessToken, "POST", body);
+          return { content: [{ type: "text", text: `Members updated. Added: ${add_member_resource_names?.length || 0}, Removed: ${remove_member_resource_names?.length || 0}` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+  
+  }
+
+// ── Unified entry point ───────────────────────────────────────────────────────
+
+export function registerContactsTools(server: McpServer, getCreds: GetCredsFunc): void {
+  _registerContactsCore(server, getCreds);
+  _registerContactsExtra(server, getCreds);
+  _registerContactGroupsConsolidated(server, getCreds);
 }

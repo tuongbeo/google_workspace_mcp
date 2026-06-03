@@ -35,7 +35,7 @@ function encodeEmail(headers: string, body: string): string {
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
-export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("search_gmail_messages", "Search Gmail messages using Gmail query syntax.", {
     query: z.string().describe("Gmail query, e.g. 'from:boss@company.com is:unread'"),
@@ -250,7 +250,7 @@ export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc) {
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
 
-export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerGmailExtra(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_gmail_threads_content_batch", "Batch-retrieve full content of multiple Gmail threads.", {
     thread_ids: z.array(z.string()).describe("List of thread IDs (max 10)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ thread_ids }) => {
@@ -320,4 +320,11 @@ export function registerGmailExtraTools(server: McpServer, getCreds: GetCredsFun
     const result = await gmailRequest(accessToken, "/settings/filters", "POST", { criteria, action: actionObj }) as any;
     return { content: [{ type: "text", text: `Filter created. ID: ${result.id}` }] };
   }));
+}
+
+// ── Unified entry point ───────────────────────────────────────────────────────
+
+export function registerGmailTools(server: McpServer, getCreds: GetCredsFunc): void {
+  _registerGmailCore(server, getCreds);
+  _registerGmailExtra(server, getCreds);
 }

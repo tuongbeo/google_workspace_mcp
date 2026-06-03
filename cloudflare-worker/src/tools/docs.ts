@@ -1,10 +1,14 @@
 /**
- * Google Docs MCP Tools — Full implementation
+ * Google Docs MCP Tools
+ * Consolidated from: docs.ts, docs-advanced.ts, docs-phase2.ts, write-google-doc.ts
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { docsRequest, googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import { parseMarkdown } from "../docs-engine/parser";
+import { buildExecutionPlan } from "../docs-engine/builder";
+import { executePass1, executePass2, executePass3, applyHeaderFooter } from "../docs-engine/executor";
 import type { GetCredsFunc } from "../types";
 
 // ── Module-level helpers (pure functions, fully testable) ─────────────────────
@@ -54,7 +58,7 @@ function findDocTab(tabList: any[], id: string): any | null {
   return null;
 }
 
-export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("get_google_doc", "Get the content of a Google Doc as text. Supports multi-tab documents.", {
     document_id: z.string(),
@@ -243,7 +247,7 @@ export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc) {
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
 
-export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("search_docs", "Search Google Docs by name in Drive.", {
     query: z.string().describe("Text to search in document names"),
     max_results: z.number().optional().default(10),
@@ -543,4 +547,1001 @@ export function registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc
   );
 
 
+}
+
+
+function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
+
+  // ── Named Ranges ────────────────────────────────────────────────────────────
+
+  server.tool(
+    "create_named_range",
+    "Create a named range in a Google Doc. Named ranges let you reference specific content " +
+    "by name instead of by index — useful for bookmarks, content anchors, and programmatic editing. " +
+    "Returns the named range ID. Use inspect_doc_structure to find valid startIndex/endIndex values.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      name: z.string().describe("Name for the range (must be unique in the document)"),
+      start_index: z.number().int().describe("Start character index (inclusive, 1-based from inspect_doc_structure)"),
+      end_index: z.number().int().describe("End character index (exclusive)"),
+      tab_id: z.string().optional().describe("Tab ID for multi-tab docs. Omit for default tab."),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, name, start_index, end_index, tab_id }) => {
+      const { accessToken } = await getCreds();
+      const range: Record<string, unknown> = {
+        startIndex: start_index,
+        endIndex: end_index,
+      };
+      if (tab_id) range.tabId = tab_id;
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ createNamedRange: { name, range } }],
+      }) as any;
+      const namedRangeId = result.replies?.[0]?.createNamedRange?.namedRangeId;
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Named range created: "${name}"`,
+            `ID: ${namedRangeId}`,
+            `Range: [${start_index}, ${end_index})`,
+            tab_id ? `Tab: ${tab_id}` : "",
+          ].filter(Boolean).join("\n"),
+        }],
+      };
+    })
+  );
+
+  server.tool(
+    "list_named_ranges",
+    "List all named ranges defined in a Google Doc. Returns name, ID, and character range for each. " +
+    "Named ranges are useful for finding bookmarks, structured content anchors, or ranges set by other apps.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+    },
+    { readOnlyHint: true },
+    withErrorHandler(async ({ document_id }) => {
+      const { accessToken } = await getCreds();
+      const doc = await docsRequest(accessToken, document_id, "?fields=namedRanges,title") as any;
+      const namedRanges = doc.namedRanges || {};
+      const entries = Object.entries(namedRanges) as [string, any][];
+      if (!entries.length) {
+        return { content: [{ type: "text", text: `Document "${doc.title}" has no named ranges.` }] };
+      }
+      const lines = [`Named ranges in "${doc.title}" (${entries.length}):`, ""];
+      for (const [name, info] of entries) {
+        const ranges = info.namedRanges || [];
+        for (const nr of ranges) {
+          for (const r of nr.ranges || []) {
+            lines.push(`- "${name}" (ID: ${nr.namedRangeId})`);
+            lines.push(`  Range: [${r.startIndex ?? 0}, ${r.endIndex ?? "?"})`);
+            if (r.tabId) lines.push(`  Tab: ${r.tabId}`);
+          }
+        }
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    })
+  );
+
+  server.tool(
+    "delete_named_range",
+    "Delete a named range from a Google Doc by its ID or name. " +
+    "Use list_named_ranges to find IDs. Deleting a named range does NOT delete the content — " +
+    "it only removes the name tag.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      named_range_id: z.string().optional().describe("Named range ID (preferred — use list_named_ranges to find it)"),
+      name: z.string().optional().describe("Named range name (deletes ALL ranges with this name)"),
+    },
+    { readOnlyHint: false, destructiveHint: true },
+    withErrorHandler(async ({ document_id, named_range_id, name }) => {
+      const { accessToken } = await getCreds();
+      if (!named_range_id && !name) {
+        return { content: [{ type: "text", text: "Error: provide either named_range_id or name." }] };
+      }
+      const deleteReq: Record<string, unknown> = {};
+      if (named_range_id) deleteReq.namedRangeId = named_range_id;
+      else if (name) deleteReq.name = name;
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ deleteNamedRange: deleteReq }],
+      });
+      const label = named_range_id ? `ID "${named_range_id}"` : `name "${name}"`;
+      return { content: [{ type: "text", text: `Named range ${label} deleted.` }] };
+    })
+  );
+
+  // ── Footnotes ────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "insert_footnote",
+    "Insert a footnote at a specific index in a Google Doc. The footnote marker appears inline " +
+    "at the given index, and footnote content is appended to the document's footnote section. " +
+    "After insertion, use batch_update_doc with insertText to add the footnote body text " +
+    "(target the footnote segment ID returned by this tool).",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      index: z.number().int().describe("Character index where the footnote marker is inserted"),
+      tab_id: z.string().optional().describe("Tab ID for multi-tab docs"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, index, tab_id }) => {
+      const { accessToken } = await getCreds();
+      const location: Record<string, unknown> = { index };
+      if (tab_id) location.tabId = tab_id;
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ createFootnote: { location } }],
+      }) as any;
+      const footnoteId = result.replies?.[0]?.createFootnote?.footnoteId;
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Footnote marker inserted at index ${index}.`,
+            `Footnote ID: ${footnoteId}`,
+            "",
+            "To add footnote body text, call batch_update_doc with:",
+            `  { "insertText": { "location": { "segmentId": "${footnoteId}", "index": 1 }, "text": "Your footnote text here." } }`,
+          ].join("\n"),
+        }],
+      };
+    })
+  );
+
+  // ── Inline Images ────────────────────────────────────────────────────────────
+
+  server.tool(
+    "insert_inline_image",
+    "Insert an inline image into a Google Doc at a specific index. The image is embedded " +
+    "directly in the text flow. Supports images from public URLs or Google Drive file IDs. " +
+    "Use inspect_doc_structure to find a valid insertion index.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      index: z.number().int().describe("Character index where the image is inserted (from inspect_doc_structure)"),
+      image_url: z.string().optional().describe("Public image URL (https://). Use this OR drive_file_id."),
+      drive_file_id: z.string().optional().describe("Google Drive file ID of an image. Use this OR image_url."),
+      width_pt: z.number().optional().describe("Image width in points (1 inch = 72 pt). Omit to keep original size."),
+      height_pt: z.number().optional().describe("Image height in points. Omit to keep original size."),
+      tab_id: z.string().optional().describe("Tab ID for multi-tab docs"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, index, image_url, drive_file_id, width_pt, height_pt, tab_id }) => {
+      const { accessToken } = await getCreds();
+      if (!image_url && !drive_file_id) {
+        return { content: [{ type: "text", text: "Error: provide either image_url or drive_file_id." }] };
+      }
+      const location: Record<string, unknown> = { index };
+      if (tab_id) location.tabId = tab_id;
+
+      const req: Record<string, unknown> = { location };
+      if (image_url) {
+        req.uri = image_url;
+      } else if (drive_file_id) {
+        req.driveFileId = drive_file_id;
+      }
+      if (width_pt || height_pt) {
+        req.objectSize = {
+          width: width_pt ? { magnitude: width_pt, unit: "PT" } : undefined,
+          height: height_pt ? { magnitude: height_pt, unit: "PT" } : undefined,
+        };
+      }
+
+      const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ insertInlineImage: req }],
+      }) as any;
+      const objectId = result.replies?.[0]?.insertInlineImage?.objectId;
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Image inserted at index ${index}.`,
+            `Object ID: ${objectId}`,
+            width_pt || height_pt ? `Size: ${width_pt ?? "auto"}×${height_pt ?? "auto"} pt` : "Size: original",
+          ].join("\n"),
+        }],
+      };
+    })
+  );
+
+  // ── Document Page Styling ────────────────────────────────────────────────────
+
+  server.tool(
+    "update_document_style",
+    "Update document-level page style settings: margins, page size, orientation, " +
+    "background color, and pagination mode. All margin/size values are in points (1 inch = 72pt). " +
+    "Only provide the fields you want to change — unset fields are left unchanged.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      margin_top_pt: z.number().optional().describe("Top margin in points (default ~72pt = 1 inch)"),
+      margin_bottom_pt: z.number().optional().describe("Bottom margin in points"),
+      margin_left_pt: z.number().optional().describe("Left margin in points"),
+      margin_right_pt: z.number().optional().describe("Right margin in points"),
+      page_width_pt: z.number().optional().describe("Page width in points. Letter=612, A4=595."),
+      page_height_pt: z.number().optional().describe("Page height in points. Letter=792, A4=842."),
+      background_color_hex: z.string().optional().describe("Page background color hex, e.g. '#FFFFFF'"),
+      use_even_page_header_footer: z.boolean().optional().describe("Use different header/footer for even pages"),
+      use_first_page_header_footer: z.boolean().optional().describe("Use different header/footer for first page"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({
+      document_id,
+      margin_top_pt, margin_bottom_pt, margin_left_pt, margin_right_pt,
+      page_width_pt, page_height_pt, background_color_hex,
+      use_even_page_header_footer, use_first_page_header_footer,
+    }) => {
+      const { accessToken } = await getCreds();
+
+      function hexToRgb(hex: string) {
+        return {
+          red: parseInt(hex.slice(1, 3), 16) / 255,
+          green: parseInt(hex.slice(3, 5), 16) / 255,
+          blue: parseInt(hex.slice(5, 7), 16) / 255,
+        };
+      }
+
+      function pt(val: number) {
+        return { magnitude: val, unit: "PT" };
+      }
+
+      const style: Record<string, unknown> = {};
+      const fields: string[] = [];
+
+      if (margin_top_pt !== undefined) { style.marginTop = pt(margin_top_pt); fields.push("marginTop"); }
+      if (margin_bottom_pt !== undefined) { style.marginBottom = pt(margin_bottom_pt); fields.push("marginBottom"); }
+      if (margin_left_pt !== undefined) { style.marginLeft = pt(margin_left_pt); fields.push("marginLeft"); }
+      if (margin_right_pt !== undefined) { style.marginRight = pt(margin_right_pt); fields.push("marginRight"); }
+      if (page_width_pt !== undefined) { style.pageSize = { ...(style.pageSize as any || {}), width: pt(page_width_pt) }; fields.push("pageSize"); }
+      if (page_height_pt !== undefined) { style.pageSize = { ...(style.pageSize as any || {}), height: pt(page_height_pt) }; fields.push("pageSize"); }
+      if (background_color_hex) {
+        style.background = { color: { color: { rgbColor: hexToRgb(background_color_hex) } } };
+        fields.push("background");
+      }
+      if (use_even_page_header_footer !== undefined) { style.useEvenPageHeaderFooter = use_even_page_header_footer; fields.push("useEvenPageHeaderFooter"); }
+      if (use_first_page_header_footer !== undefined) { style.useFirstPageHeaderFooter = use_first_page_header_footer; fields.push("useFirstPageHeaderFooter"); }
+
+      if (!fields.length) {
+        return { content: [{ type: "text", text: "No style changes specified." }] };
+      }
+
+      // Deduplicate fields
+      const uniqueFields = [...new Set(fields)];
+
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ updateDocumentStyle: { documentStyle: style, fields: uniqueFields.join(",") } }],
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `Document style updated.\nFields changed: ${uniqueFields.join(", ")}`,
+        }],
+      };
+    })
+  );
+
+  // ── Default Paragraph Style ──────────────────────────────────────────────────
+
+
+  // ── Suggestions (Tracked Changes) ───────────────────────────────────────────
+
+  server.tool(
+    "get_doc_suggestions",
+    "Retrieve all pending suggestions (tracked changes) in a Google Doc. " +
+    "Returns each suggestion's ID, author, type, and the suggested text change. " +
+    "Use accept_suggestion or reject_suggestion to act on them.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+    },
+    { readOnlyHint: true },
+    withErrorHandler(async ({ document_id }) => {
+      const { accessToken } = await getCreds();
+      // Fetch with SUGGESTIONS_INLINE to get suggestion data
+      const doc = await docsRequest(
+        accessToken,
+        document_id,
+        "GET",
+        "?suggestionsViewMode=SUGGESTIONS_INLINE&includeTabsContent=true&fields=title,suggestionsViewMode,body,tabs"
+      ) as any;
+
+      // Collect suggestions from body content
+      const suggestions: Record<string, any> = {};
+
+      function scanContent(content: any[]) {
+        for (const elem of content || []) {
+          // Check paragraph elements for suggestedInsertions / suggestedDeletions
+          for (const pe of elem.paragraph?.elements || []) {
+            for (const [sugId, sug] of Object.entries(pe.suggestedInsertions || {})) {
+              if (!suggestions[sugId]) suggestions[sugId] = { id: sugId, type: "insertion", changes: [] };
+              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: (sug as any).suggestionsMetadata });
+            }
+            for (const [sugId, sug] of Object.entries(pe.suggestedDeletions || {})) {
+              if (!suggestions[sugId]) suggestions[sugId] = { id: sugId, type: "deletion", changes: [] };
+              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: (sug as any).suggestionsMetadata });
+            }
+          }
+        }
+      }
+
+      scanContent(doc.body?.content);
+      for (const tab of doc.tabs || []) {
+        scanContent(tab.documentTab?.body?.content);
+      }
+
+      const list = Object.values(suggestions);
+      if (!list.length) {
+        return { content: [{ type: "text", text: `No pending suggestions in "${doc.title}".` }] };
+      }
+
+      const lines = [`${list.length} suggestion(s) in "${doc.title}":`, ""];
+      for (const s of list) {
+        lines.push(`ID: ${s.id} | Type: ${s.type}`);
+        const textPreview = s.changes.map((c: any) => c.text?.replace(/\n/g, "\\n")).join("").substring(0, 80);
+        if (textPreview) lines.push(`  Text: "${textPreview}"`);
+        lines.push("");
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    })
+  );
+
+  server.tool(
+    "accept_suggestion",
+    "Accept a specific suggestion (tracked change) in a Google Doc by its suggestion ID. " +
+    "Accepting inserts or removes the suggested text permanently. " +
+    "Use get_doc_suggestions to find suggestion IDs.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      suggestion_id: z.string().describe("Suggestion ID (from get_doc_suggestions)"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, suggestion_id }) => {
+      const { accessToken } = await getCreds();
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ acceptSuggestion: { suggestionId: suggestion_id } }],
+      });
+      return { content: [{ type: "text", text: `Suggestion "${suggestion_id}" accepted.` }] };
+    })
+  );
+
+  server.tool(
+    "reject_suggestion",
+    "Reject a specific suggestion (tracked change) in a Google Doc by its suggestion ID. " +
+    "Rejecting discards the proposed change and keeps the original text. " +
+    "Use get_doc_suggestions to find suggestion IDs.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+      suggestion_id: z.string().describe("Suggestion ID (from get_doc_suggestions)"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, suggestion_id }) => {
+      const { accessToken } = await getCreds();
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{ rejectSuggestion: { suggestionId: suggestion_id } }],
+      });
+      return { content: [{ type: "text", text: `Suggestion "${suggestion_id}" rejected.` }] };
+    })
+  );
+
+  // ── Document metadata ───────────────────────────────────────────────────────
+
+  server.tool(
+    "get_doc_metadata",
+    "Get detailed metadata about a Google Doc: title, revision ID, word count, " +
+    "page count estimate, tab count, suggestion count, and document style (margins, page size). " +
+    "Useful as a fast document overview without fetching full content.",
+    {
+      document_id: z.string().describe("Google Doc ID"),
+    },
+    { readOnlyHint: true },
+    withErrorHandler(async ({ document_id }) => {
+      const { accessToken } = await getCreds();
+      const doc = await googleFetch(
+        `https://docs.googleapis.com/v1/documents/${document_id}?fields=title,revisionId,documentStyle,suggestionsViewMode,tabs,body&includeTabsContent=false`,
+        accessToken
+      ) as any;
+
+      const style = doc.documentStyle || {};
+      const pageSize = style.pageSize || {};
+      const lines = [
+        `Title: ${doc.title}`,
+        `Revision ID: ${doc.revisionId || "N/A"}`,
+        `Tabs: ${doc.tabs?.length ?? 1}`,
+      ];
+
+      if (pageSize.width || pageSize.height) {
+        const w = pageSize.width?.magnitude;
+        const h = pageSize.height?.magnitude;
+        const unit = pageSize.width?.unit || "PT";
+        lines.push(`Page size: ${w}×${h} ${unit} (${unit === "PT" ? `${(w/72).toFixed(2)}"×${(h/72).toFixed(2)}"` : ""})`);
+      }
+      if (style.marginTop) {
+        const mt = style.marginTop.magnitude;
+        const mb = style.marginBottom?.magnitude;
+        const ml = style.marginLeft?.magnitude;
+        const mr = style.marginRight?.magnitude;
+        lines.push(`Margins (pt): top=${mt} bottom=${mb} left=${ml} right=${mr}`);
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    })
+  );
+}
+
+
+function _registerDocsPhase2Tools(server: McpServer, getCreds: GetCredsFunc) {
+
+  // ── manage_table_cells ──────────────────────────────────────────────────────
+
+  server.tool("manage_table_cells",
+    "Merge/unmerge table cells, set column widths, or set row min-height in a Google Doc.",
+    {
+      action:           z.enum(["merge","unmerge","set_column_width","set_row_height"]),
+      document_id:      z.string(),
+      table_start_index: z.number().int().describe("Character index where the table starts (from inspect_doc_structure)"),
+      row_start:        z.number().int().optional().describe("0-based start row (merge/unmerge)"),
+      row_end:          z.number().int().optional().describe("0-based end row exclusive (merge/unmerge)"),
+      col_start:        z.number().int().optional().describe("0-based start col (merge/unmerge/set_column_width)"),
+      col_end:          z.number().int().optional().describe("0-based end col exclusive (merge/unmerge)"),
+      width_pt:         z.number().optional().describe("Column width in points (set_column_width)"),
+      height_pt:        z.number().optional().describe("Minimum row height in points (set_row_height)"),
+      row_index:        z.number().int().optional().describe("0-based row index (set_row_height)"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ action, document_id, table_start_index, row_start = 0, row_end = 1, col_start = 0, col_end = 1, width_pt, height_pt, row_index = 0 }) => {
+      const { accessToken } = await getCreds();
+
+      const tableCellLoc = {
+        tableStartLocation: { index: table_start_index },
+        rowIndex: row_start,
+        columnIndex: col_start,
+      };
+
+      let req: any;
+      if (action === "merge") {
+        req = {
+          mergeTableCells: {
+            tableRange: {
+              tableCellLocation: tableCellLoc,
+              rowSpan: (row_end ?? row_start + 1) - row_start,
+              columnSpan: (col_end ?? col_start + 1) - col_start,
+            },
+          },
+        };
+      } else if (action === "unmerge") {
+        req = {
+          unmergeTableCells: {
+            tableRange: {
+              tableCellLocation: tableCellLoc,
+              rowSpan: (row_end ?? row_start + 1) - row_start,
+              columnSpan: (col_end ?? col_start + 1) - col_start,
+            },
+          },
+        };
+      } else if (action === "set_column_width") {
+        if (!width_pt) throw new Error("width_pt required");
+        req = {
+          updateTableColumnProperties: {
+            tableStartLocation: { index: table_start_index },
+            columnIndices: [col_start],
+            tableColumnProperties: {
+              widthType: "FIXED_WIDTH",
+              width: { magnitude: width_pt, unit: "PT" },
+            },
+            fields: "widthType,width",
+          },
+        };
+      } else if (action === "set_row_height") {
+        if (!height_pt) throw new Error("height_pt required");
+        req = {
+          updateTableRowStyle: {
+            tableStartLocation: { index: table_start_index },
+            rowIndices: [row_index],
+            tableRowStyle: { minRowHeight: { magnitude: height_pt, unit: "PT" } },
+            fields: "minRowHeight",
+          },
+        };
+      }
+
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [req] });
+      return { content: [{ type: "text", text: `Table cell action "${action}" completed.` }] };
+    }),
+  );
+
+  // ── insert_section_break ────────────────────────────────────────────────────
+
+  server.tool("insert_section_break",
+    "Insert a section break in a Google Doc (page break or continuous).",
+    {
+      document_id:  z.string(),
+      index:        z.number().int().describe("Character index to insert at (from inspect_doc_structure)"),
+      section_type: z.enum(["NEXT_PAGE","CONTINUOUS","EVEN_PAGE","ODD_PAGE"]).optional().default("NEXT_PAGE"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, index, section_type = "NEXT_PAGE" }) => {
+      const { accessToken } = await getCreds();
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{
+          insertSectionBreak: {
+            location: { index },
+            sectionType: section_type,
+          },
+        }],
+      });
+      return { content: [{ type: "text", text: `Section break (${section_type}) inserted at index ${index}.` }] };
+    }),
+  );
+
+  // ── delete_paragraph_bullets ────────────────────────────────────────────────
+
+  server.tool("delete_paragraph_bullets",
+    "Remove bullet/list formatting from a range of paragraphs in a Google Doc. Preserves the text.",
+    {
+      document_id: z.string(),
+      start_index: z.number().int().describe("Start character index of the range"),
+      end_index:   z.number().int().describe("End character index of the range"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ document_id, start_index, end_index }) => {
+      const { accessToken } = await getCreds();
+      await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+        requests: [{
+          deleteParagraphBullets: {
+            range: { startIndex: start_index, endIndex: end_index },
+          },
+        }],
+      });
+      return { content: [{ type: "text", text: `Bullets removed from range [${start_index}, ${end_index}).` }] };
+    }),
+  );
+
+} // end registerDocsPhase2Tools
+
+
+function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) {
+  server.tool(
+    "write_google_doc",
+    "Write styled content to Google Doc using markdown. Accepts full markdown with: " +
+    "headings (# H1 to ###### H6), **bold**, *italic*, ~~strikethrough~~, " +
+    "bullet lists, numbered lists, checklists (- [ ] / - [x]), tables, " +
+    "inline `code` and fenced code blocks, > blockquotes, ![images](url), " +
+    "@[Name](email) mentions, footnotes ([^1] + [^1]: text), [links](url), " +
+    "--- horizontal rules, \\pagebreak, and \\toc (table of contents). " +
+    "Creates new doc if no document_id. Appends to existing doc if document_id provided. " +
+    "Supports multi-tab documents. Theme and font pair control visual styling.",
+    {
+      // Content
+      content: z.string().describe("Markdown content with extended syntax"),
+
+      // Styling
+      theme: z.enum(["corporate", "modern", "warm", "nature", "minimal", "vibrant"])
+        .optional().default("corporate")
+        .describe("Visual theme for the document"),
+      font_pair: z.enum(["arial_roboto", "georgia_source", "inter_system", "merriweather_open"])
+        .optional().default("arial_roboto")
+        .describe("Heading and body font pair"),
+
+      // Create mode
+      name: z.string().optional()
+        .describe("Document name — required when creating a new doc (no document_id)"),
+      parent_folder_id: z.string().optional()
+        .describe("Drive folder ID to place the new doc in"),
+
+      // Append mode
+      document_id: z.string().optional()
+        .describe("Existing doc ID. Provide to append or write to an existing document."),
+      tab_id: z.string().optional()
+        .describe("Write into a specific tab. Use manage_doc_tabs to list tab IDs."),
+      new_tab: z.object({
+        title: z.string(),
+        emoji: z.string().optional(),
+        parent_tab_id: z.string().optional(),
+      }).optional()
+        .describe("Create a new tab and write content into it"),
+      position: z.enum(["append", "replace"]).optional().default("append")
+        .describe("append = add after existing content (default). replace = clear then write."),
+
+      // Document options
+      header_text: z.string().optional()
+        .describe("Text displayed in the page header on every page"),
+      footer_text: z.string().optional()
+        .describe("Text displayed in the page footer on every page"),
+      alignment: z.enum(["left", "justify"]).optional().default("left")
+        .describe("Body text alignment. 'justify' for full-width justified text (good for formal documents)"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({
+      content,
+      theme = "corporate",
+      font_pair = "arial_roboto",
+      name,
+      parent_folder_id,
+      document_id,
+      tab_id,
+      new_tab,
+      position = "append",
+      header_text,
+      footer_text,
+      alignment = "left",
+    }) => {
+      const { accessToken } = await getCreds();
+
+      // ── Determine mode ─────────────────────────────────────────────────────
+
+      let docId: string;
+      let activeTabId: string | undefined = tab_id;
+      let docTitle: string;
+      let docUrl: string;
+      let applyTheme = true;
+
+      if (!document_id) {
+        // CREATE MODE
+        if (!name) throw new Error("Parameter 'name' is required when creating a new document (no document_id provided).");
+
+        const meta: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.document" };
+        if (parent_folder_id) meta.parents = [parent_folder_id];
+
+        const driveFile = await googleFetch(
+          "https://www.googleapis.com/drive/v3/files",
+          accessToken, "POST", meta
+        ) as any;
+        docId = driveFile.id;
+        docTitle = name;
+        docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+
+      } else {
+        // APPEND / REPLACE MODE
+        docId = document_id;
+
+        // Handle new_tab creation
+        if (new_tab) {
+          const tabProps: Record<string, unknown> = { title: new_tab.title };
+          if (new_tab.emoji) tabProps.iconEmoji = new_tab.emoji;
+          if (new_tab.parent_tab_id) tabProps.parentTabId = new_tab.parent_tab_id;
+          const result = await docsRequest(accessToken, docId, ":batchUpdate", "POST", {
+            requests: [{ addDocumentTab: { tabProperties: tabProps } }],
+          }) as any;
+          activeTabId = result.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
+        }
+
+        // Handle replace mode: clear content
+        if (position === "replace") {
+          const path = activeTabId ? "?includeTabsContent=true" : "";
+          const doc = await docsRequest(accessToken, docId, path) as any;
+          let bodyContent: any[];
+          if (activeTabId && doc.tabs) {
+            bodyContent = findTab(doc.tabs, activeTabId)?.documentTab?.body?.content ?? [];
+          } else {
+            bodyContent = doc.body?.content ?? [];
+          }
+          const lastElem = bodyContent.slice(-1)[0];
+          const endIndex = lastElem?.endIndex ?? 2;
+          if (endIndex > 2) {
+            const range = activeTabId
+              ? { startIndex: 1, endIndex: endIndex - 1, tabId: activeTabId }
+              : { startIndex: 1, endIndex: endIndex - 1 };
+            const clearBody: Record<string, unknown> = { requests: [{ deleteContentRange: { range } }] };
+            if (activeTabId) clearBody.tabsCriteria = { tabIds: [activeTabId] };
+            await docsRequest(accessToken, docId, ":batchUpdate", "POST", clearBody);
+          }
+        }
+
+        // Get current doc info
+        const docInfo = await docsRequest(accessToken, docId) as any;
+        docTitle = docInfo.title;
+        docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+
+        // If no explicit theme, detect from existing doc styles (don't override)
+        if (!theme || position === "append") {
+          applyTheme = !!theme; // only apply if explicitly passed
+        }
+
+        // Get start index for append
+        if (position === "append") {
+          const path2 = activeTabId ? "?includeTabsContent=true" : "";
+          const doc2 = await docsRequest(accessToken, docId, path2) as any;
+          let bodyContent2: any[];
+          if (activeTabId && doc2.tabs) {
+            bodyContent2 = findTab(doc2.tabs, activeTabId)?.documentTab?.body?.content ?? [];
+          } else {
+            bodyContent2 = doc2.body?.content ?? [];
+          }
+          // startIndex will be end of current content
+        }
+      }
+
+      // ── Parse + build plan ────────────────────────────────────────────────
+
+      const ast = parseMarkdown(content);
+      const plan = buildExecutionPlan(ast, {
+        theme,
+        fontPair: font_pair,
+        startIndex: 1,
+        tabId: activeTabId,
+        alignment,
+      });
+
+      // ── Execute Pass 1: Text + structure ──────────────────────────────────
+
+      if (plan.pass1Requests.length > 0) {
+        await executePass1(accessToken, docId, plan, activeTabId);
+      }
+
+      // ── Execute Pass 2: Rich elements ─────────────────────────────────────
+
+      const { warnings } = await executePass2(accessToken, docId, plan.richElements, activeTabId);
+
+      // ── Execute Pass 3: Theme ─────────────────────────────────────────────
+
+      if (applyTheme && plan.themeRequests.length > 0) {
+        await executePass3(accessToken, docId, plan);
+      }
+
+      // ── Header / Footer ───────────────────────────────────────────────────
+
+      if (header_text || footer_text) {
+        await applyHeaderFooter(accessToken, docId, header_text, footer_text);
+      }
+
+      // ── Response ──────────────────────────────────────────────────────────
+
+      const parts: string[] = [
+        `✅ Google Doc ${document_id ? "updated" : "created"}: "${docTitle}"`,
+        `ID: ${docId}`,
+        `URL: ${docUrl}`,
+        `Theme: ${theme} | Font: ${font_pair}`,
+        `Sections: ${plan.stats.sections} | Tables: ${plan.stats.tables} | Images: ${plan.stats.images}`,
+        plan.stats.mentions > 0 ? `Mentions: ${plan.stats.mentions}` : "",
+        plan.stats.footnotes > 0 ? `Footnotes: ${plan.stats.footnotes}` : "",
+        plan.stats.hasToc ? "TOC: inserted" : "",
+        activeTabId ? `Tab: ${activeTabId}${new_tab ? ` (new: "${new_tab.title}")` : ""}` : "",
+        warnings.length > 0 ? `\n⚠️ Warnings:\n${warnings.map(w => `  • ${w}`).join("\n")}` : "",
+      ];
+
+      return {
+        content: [{ type: "text", text: parts.filter(Boolean).join("\n") }],
+      };
+    })
+  );
+}
+
+// ── Helper ────────────────────────────────────────────────────────────────────
+
+function findTab(tabList: any[], tabId: string): any | null {
+  for (const tab of tabList ?? []) {
+    if (tab.tabProperties?.tabId === tabId) return tab;
+    const found = findTab(tab.childTabs ?? [], tabId);
+    if (found) return found;
+  }
+  return null;
+}
+
+
+function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFunc): void {
+  // ── manage_doc_tabs ─────────────────────────────────────────────────────────
+  
+    server.tool("manage_doc_tabs",
+      "List, get content, create, delete, or update tabs in a multi-tab Google Doc. Actions: list | get_content | create | delete | update.",
+      {
+        action:      z.enum(["list","get_content","create","delete","update"]),
+        document_id: z.string(),
+        tab_id:      z.string().optional().describe("Tab ID (required for get_content, delete, update)"),
+        title:       z.string().optional().describe("Tab title (create/update)"),
+        emoji:       z.string().optional().describe("Tab emoji icon (create/update), e.g. '📋'"),
+        parent_tab_id: z.string().optional().describe("Parent tab ID for nested tabs (create)"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, document_id, tab_id, title, emoji, parent_tab_id }) => {
+        const { accessToken } = await getCreds();
+  
+        if (action === "list") {
+          const doc = await docsRequest(accessToken, document_id) as any;
+          const tabs = doc.tabs || [];
+          if (!tabs.length) return { content: [{ type: "text", text: "No tabs found (single-tab document)." }] };
+          const lines = tabs.map((t: any) =>
+            `Tab: ${t.documentTab?.properties?.title || "(untitled)"} | ID: ${t.tabProperties?.tabId} | Index: ${t.tabProperties?.index}`
+          );
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+  
+        if (action === "get_content") {
+          if (!tab_id) throw new Error("tab_id required");
+          const doc = await docsRequest(accessToken, document_id, "GET", `?includeTabsContent=true`) as any;
+          const tab = (doc.tabs || []).find((t: any) => t.tabProperties?.tabId === tab_id);
+          if (!tab) throw new Error(`Tab ${tab_id} not found`);
+          const content = tab.documentTab?.body?.content || [];
+          const text = content.map((el: any) =>
+            el.paragraph?.elements?.map((e: any) => e.textRun?.content || "").join("") || ""
+          ).join("").trim();
+          return { content: [{ type: "text", text: text || "(empty tab)" }] };
+        }
+  
+        if (action === "create") {
+          const props: any = {};
+          if (title) props.title = title;
+          if (emoji) props.iconEmoji = emoji;
+          if (parent_tab_id) props.parentTabId = parent_tab_id;
+          const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ addDocumentTab: { tabProperties: props } }],
+          }) as any;
+          const newTabId = res.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
+          return { content: [{ type: "text", text: `Tab created. ID: ${newTabId}` }] };
+        }
+  
+        if (action === "delete") {
+          if (!tab_id) throw new Error("tab_id required");
+          await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ deleteDocumentTab: { tabId: tab_id } }],
+          });
+          return { content: [{ type: "text", text: `Tab ${tab_id} deleted.` }] };
+        }
+  
+        if (action === "update") {
+          if (!tab_id) throw new Error("tab_id required");
+          const props: any = { tabId: tab_id };
+          const fields: string[] = [];
+          if (title) { props.title = title; fields.push("title"); }
+          if (emoji) { props.iconEmoji = emoji; fields.push("iconEmoji"); }
+          await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ updateDocumentTab: { tabProperties: props, fields: fields.join(",") } }],
+          });
+          return { content: [{ type: "text", text: `Tab ${tab_id} updated.` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+  
+  // ── manage_named_ranges ─────────────────────────────────────────────────────
+  
+    server.tool("manage_named_ranges",
+      "Create, list, or delete named ranges in a Google Doc. Actions: create | list | delete.",
+      {
+        action:      z.enum(["create","list","delete"]),
+        document_id: z.string(),
+        name:        z.string().optional().describe("Range name (create)"),
+        start_index: z.number().int().optional(),
+        end_index:   z.number().int().optional(),
+        named_range_id: z.string().optional().describe("Named range ID (delete)"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, document_id, name, start_index, end_index, named_range_id }) => {
+        const { accessToken } = await getCreds();
+  
+        if (action === "list") {
+          const doc = await docsRequest(accessToken, document_id) as any;
+          const ranges = doc.namedRanges || {};
+          const entries = Object.entries(ranges).flatMap(([n, v]: [string, any]) =>
+            v.namedRanges.map((r: any) => `"${n}" | ID: ${r.namedRangeId} | [${r.ranges?.[0]?.startIndex}-${r.ranges?.[0]?.endIndex}]`)
+          );
+          return { content: [{ type: "text", text: entries.length ? entries.join("\n") : "No named ranges." }] };
+        }
+  
+        if (action === "create") {
+          if (!name || start_index === undefined || end_index === undefined) throw new Error("name, start_index, end_index required");
+          const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ createNamedRange: { name, range: { startIndex: start_index, endIndex: end_index } } }],
+          }) as any;
+          return { content: [{ type: "text", text: `Named range "${name}" created. ID: ${res.replies?.[0]?.createNamedRange?.namedRangeId}` }] };
+        }
+  
+        if (action === "delete") {
+          if (!named_range_id && !name) throw new Error("named_range_id or name required");
+          const req: any = named_range_id ? { namedRangeId: named_range_id } : { name };
+          await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ deleteNamedRange: req }],
+          });
+          return { content: [{ type: "text", text: `Named range deleted.` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+  
+  // ── manage_doc_comments ─────────────────────────────────────────────────────
+  
+    server.tool("manage_doc_comments",
+      "List, add, or reply to comments in a Google Doc. Actions: list | add | reply.",
+      {
+        action:      z.enum(["list","add","reply"]),
+        document_id: z.string(),
+        content:     z.string().optional().describe("Comment text (add/reply)"),
+        comment_id:  z.string().optional().describe("Comment ID (reply)"),
+        anchor: z.object({
+          start_index: z.number().int(),
+          end_index:   z.number().int(),
+        }).optional().describe("Text anchor for new comment (add)"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, document_id, content, comment_id, anchor }) => {
+        const { accessToken } = await getCreds();
+        const base = `https://www.googleapis.com/drive/v3/files/${document_id}/comments`;
+  
+        if (action === "list") {
+          const data = await googleFetch(`${base}?fields=comments(id,content,author,createdTime,replies)&maxResults=50`, accessToken) as any;
+          const comments = data.comments || [];
+          if (!comments.length) return { content: [{ type: "text", text: "No comments." }] };
+          const lines = comments.map((c: any) =>
+            `[${c.id}] ${c.author?.displayName}: ${c.content} (${new Date(c.createdTime).toLocaleDateString()})`
+          );
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+  
+        if (action === "add") {
+          if (!content) throw new Error("content required");
+          const body: any = { content };
+          if (anchor) body.anchor = `{"r":"head","a":[{"l":"${anchor.start_index},${anchor.end_index}"}]}`;
+          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          return { content: [{ type: "text", text: `Comment added. ID: ${res.id}` }] };
+        }
+  
+        if (action === "reply") {
+          if (!comment_id || !content) throw new Error("comment_id and content required");
+          const res = await googleFetch(`${base}/${comment_id}/replies`, accessToken, "POST", { content }) as any;
+          return { content: [{ type: "text", text: `Reply added. ID: ${res.id}` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+  
+  // ── manage_doc_suggestions ──────────────────────────────────────────────────
+  
+    server.tool("manage_doc_suggestions",
+      "List, accept, or reject tracked changes (suggestions) in a Google Doc. Actions: list | accept | reject.",
+      {
+        action:        z.enum(["list","accept","reject"]),
+        document_id:   z.string(),
+        suggestion_id: z.string().optional().describe("Suggestion ID (accept/reject)"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, document_id, suggestion_id }) => {
+        const { accessToken } = await getCreds();
+  
+        if (action === "list") {
+          const doc = await docsRequest(accessToken, document_id) as any;
+          const suggestions = doc.suggestionsViewMode === "SUGGESTIONS_INLINE" ? [] : [];
+          // Get suggestions via batchUpdate dry-run or via the doc body
+          const body = doc.body?.content || [];
+          const found: string[] = [];
+          for (const el of body) {
+            if (el.paragraph?.elements) {
+              for (const e of el.paragraph.elements) {
+                if (e.textRun?.suggestedInsertionIds?.length || e.textRun?.suggestedDeletionIds?.length) {
+                  const ids = [...(e.textRun.suggestedInsertionIds || []), ...(e.textRun.suggestedDeletionIds || [])];
+                  found.push(...ids.map((id: string) => `ID: ${id} | Text: "${e.textRun.content?.trim()}"`));
+                }
+              }
+            }
+          }
+          return { content: [{ type: "text", text: found.length ? found.join("\n") : "No suggestions found." }] };
+        }
+  
+        if (action === "accept") {
+          if (!suggestion_id) throw new Error("suggestion_id required");
+          await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ acceptAllSuggestionsWithId: { suggestionId: suggestion_id } }],
+          });
+          return { content: [{ type: "text", text: `Suggestion ${suggestion_id} accepted.` }] };
+        }
+  
+        if (action === "reject") {
+          if (!suggestion_id) throw new Error("suggestion_id required");
+          await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
+            requests: [{ rejectAllSuggestionsWithId: { suggestionId: suggestion_id } }],
+          });
+          return { content: [{ type: "text", text: `Suggestion ${suggestion_id} rejected.` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+}
+
+// ── Unified entry point ───────────────────────────────────────────────────────
+
+export function registerDocsTools(server: McpServer, getCreds: GetCredsFunc): void {
+  _registerDocsCoreTools(server, getCreds);
+  _registerDocsExtraTools(server, getCreds);
+  _registerDocsAdvancedTools(server, getCreds);
+  _registerDocsPhase2Tools(server, getCreds);
+  _registerWriteGoogleDocTool(server, getCreds);
+  _registerDocsConsolidatedTools(server, getCreds);
 }

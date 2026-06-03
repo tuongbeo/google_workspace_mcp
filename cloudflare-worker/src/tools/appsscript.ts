@@ -1,5 +1,6 @@
 /**
- * Google Apps Script MCP Tools — Full implementation
+ * Google Apps Script MCP Tools
+ * Consolidated from: appsscript.ts, appsscript-phase2.ts, consolidated.ts (script tools)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -7,10 +8,9 @@ import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
 
-
 const SCRIPT_BASE = "https://script.googleapis.com/v1";
 
-export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_script_projects", "List Google Apps Script projects accessible to the user.", {
     page_size: z.number().optional().default(20),
@@ -169,7 +169,7 @@ export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFun
 
 // ─── Additional tools to match upstream ──────────────────────────────────────
 
-export function registerAppsScriptExtraTools(server: McpServer, getCreds: GetCredsFunc) {
+function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("create_script_version", "Create a versioned snapshot of a Google Apps Script project.", {
     script_id: z.string(),
     description: z.string().optional().describe("Version description"),
@@ -224,4 +224,192 @@ export function registerAppsScriptExtraTools(server: McpServer, getCreds: GetCre
     if (!data.activeUsers && !data.totalExecutions) lines.push("No metrics data available.");
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
+}
+
+
+
+function _registerAppsScriptPhase2(server: McpServer, getCreds: GetCredsFunc) {
+
+  server.tool("manage_triggers",
+    "List, create, or delete Apps Script time-based and event-driven triggers.",
+    {
+      action:        z.enum(["list","create","delete"]),
+      script_id:     z.string(),
+      trigger_id:    z.string().optional().describe("Trigger ID (required for delete)"),
+      function_name: z.string().optional().describe("Function to call (required for create)"),
+      trigger_type:  z.enum(["CLOCK","CALENDAR_EVENT_UPDATED","FORM_SUBMIT","SPREADSHEET_OPEN","SPREADSHEET_EDIT","SPREADSHEET_CHANGE","SPREADSHEET_ON_FORM_SUBMIT","DOCUMENT_OPEN"]).optional(),
+      schedule: z.object({
+        every_minutes: z.number().int().optional().describe("Run every N minutes (1, 5, 10, 15, 30)"),
+        every_hours:   z.number().int().optional().describe("Run every N hours (1, 2, 4, 6, 8, 12)"),
+        at_hour:       z.number().int().min(0).max(23).optional().describe("Hour of day (0-23) for daily trigger"),
+        day_of_week:   z.number().int().min(1).max(7).optional().describe("Day of week (1=Mon, 7=Sun) for weekly trigger"),
+      }).optional(),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ action, script_id, trigger_id, function_name, trigger_type, schedule }) => {
+      const { accessToken } = await getCreds();
+
+      if (action === "list") {
+        const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/triggers`, accessToken) as any;
+        const triggers = data.triggers || [];
+        if (!triggers.length) return { content: [{ type: "text", text: "No triggers found." }] };
+        const lines = triggers.map((t: any) =>
+          `ID: ${t.triggerId} | Fn: ${t.functionName} | Type: ${t.eventType} | Source: ${t.triggerSource}`
+        );
+        return { content: [{ type: "text", text: `Triggers (${triggers.length}):\n${lines.join("\n")}` }] };
+      }
+
+      if (action === "delete") {
+        if (!trigger_id) throw new Error("trigger_id required for delete");
+        await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/triggers/${trigger_id}`, accessToken, "DELETE");
+        return { content: [{ type: "text", text: `Trigger ${trigger_id} deleted.` }] };
+      }
+
+      if (action === "create") {
+        if (!function_name) throw new Error("function_name required for create");
+        const triggerBody: any = {
+          functionName: function_name,
+          scriptId: script_id,
+        };
+
+        if (trigger_type === "CLOCK" || schedule) {
+          // Time-based trigger
+          if (schedule?.every_minutes) {
+            triggerBody.time = { everyMinutes: schedule.every_minutes };
+          } else if (schedule?.every_hours) {
+            triggerBody.time = { everyHours: schedule.every_hours };
+          } else if (schedule?.at_hour !== undefined && schedule?.day_of_week) {
+            triggerBody.time = {
+              weekDay: schedule.day_of_week,
+              atHour: schedule.at_hour,
+            };
+          } else if (schedule?.at_hour !== undefined) {
+            triggerBody.time = { atHour: schedule.at_hour };
+          } else {
+            triggerBody.time = { everyHours: 1 }; // default: every 1 hour
+          }
+        } else {
+          // Event-based trigger
+          triggerBody.eventType = trigger_type || "SPREADSHEET_EDIT";
+        }
+
+        const result = await googleFetch(
+          `${SCRIPT_BASE}/projects/${script_id}/triggers`,
+          accessToken, "POST", triggerBody,
+        ) as any;
+        return { content: [{ type: "text", text: [
+          `Trigger created.`,
+          `ID: ${result.triggerId}`,
+          `Function: ${result.functionName}`,
+          `Type: ${result.eventType || "TIME_BASED"}`,
+        ].join("\n") }] };
+      }
+
+      return { content: [{ type: "text", text: "Unknown action." }] };
+    }),
+  );
+
+} // end registerAppsScriptPhase2Tools
+
+
+function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFunc): void {
+  // ── manage_script_deployments ───────────────────────────────────────────────
+  
+    server.tool("manage_script_deployments",
+      "Create, list, update, or delete Apps Script deployments. Actions: create | list | update | delete.",
+      {
+        action:        z.enum(["create","list","update","delete"]),
+        script_id:     z.string(),
+        deployment_id: z.string().optional().describe("Deployment ID (update/delete)"),
+        version_number: z.number().int().optional().describe("Script version to deploy (create/update)"),
+        description:   z.string().optional(),
+        access_level:  z.enum(["MYSELF","DOMAIN","ANYONE","ANYONE_ANONYMOUS"]).optional().default("MYSELF"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, script_id, deployment_id, version_number, description, access_level = "MYSELF" }) => {
+        const { accessToken } = await getCreds();
+        const base = `https://script.googleapis.com/v1/projects/${script_id}/deployments`;
+  
+        if (action === "list") {
+          const data = await googleFetch(base, accessToken) as any;
+          const deps = data.deployments || [];
+          const lines = deps.map((d: any) => `ID: ${d.deploymentId} | ${d.deploymentConfig?.description || "(no desc)"} | v${d.deploymentConfig?.versionNumber}`);
+          return { content: [{ type: "text", text: lines.join("\n") || "No deployments." }] };
+        }
+  
+        if (action === "create") {
+          const body: any = { deploymentConfig: { scriptId: script_id, access: access_level } };
+          if (version_number) body.deploymentConfig.versionNumber = version_number;
+          if (description) body.deploymentConfig.description = description;
+          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          return { content: [{ type: "text", text: `Deployment created. ID: ${res.deploymentId}` }] };
+        }
+  
+        if (action === "update") {
+          if (!deployment_id) throw new Error("deployment_id required");
+          const body: any = { deploymentConfig: {} };
+          if (version_number) body.deploymentConfig.versionNumber = version_number;
+          if (description) body.deploymentConfig.description = description;
+          if (access_level) body.deploymentConfig.access = access_level;
+          const res = await googleFetch(`${base}/${deployment_id}`, accessToken, "PUT", body) as any;
+          return { content: [{ type: "text", text: `Deployment ${res.deploymentId} updated.` }] };
+        }
+  
+        if (action === "delete") {
+          if (!deployment_id) throw new Error("deployment_id required");
+          await googleFetch(`${base}/${deployment_id}`, accessToken, "DELETE");
+          return { content: [{ type: "text", text: `Deployment ${deployment_id} deleted.` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+
+  // ── manage_script_versions ──────────────────────────────────────────────────
+  
+    server.tool("manage_script_versions",
+      "Create, list, or get versions of an Apps Script project. Actions: create | list | get.",
+      {
+        action:         z.enum(["create","list","get"]),
+        script_id:      z.string(),
+        version_number: z.number().int().optional().describe("Version number (get)"),
+        description:    z.string().optional().describe("Version description (create)"),
+      },
+      { readOnlyHint: false },
+      withErrorHandler(async ({ action, script_id, version_number, description }) => {
+        const { accessToken } = await getCreds();
+        const base = `https://script.googleapis.com/v1/projects/${script_id}/versions`;
+  
+        if (action === "list") {
+          const data = await googleFetch(base, accessToken) as any;
+          const vers = data.versions || [];
+          const lines = vers.map((v: any) => `v${v.versionNumber} | ${v.createTime} | ${v.description || ""}`);
+          return { content: [{ type: "text", text: lines.join("\n") || "No versions." }] };
+        }
+  
+        if (action === "create") {
+          const body: any = {};
+          if (description) body.description = description;
+          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          return { content: [{ type: "text", text: `Version v${res.versionNumber} created.` }] };
+        }
+  
+        if (action === "get") {
+          if (!version_number) throw new Error("version_number required");
+          const v = await googleFetch(`${base}/${version_number}`, accessToken) as any;
+          return { content: [{ type: "text", text: `v${v.versionNumber} | ${v.createTime} | ${v.description || ""}` }] };
+        }
+  
+        return { content: [{ type: "text", text: "Unknown action." }] };
+      }),
+    );
+}
+
+// ── Unified entry point ───────────────────────────────────────────────────────
+
+export function registerAppsScriptTools(server: McpServer, getCreds: GetCredsFunc): void {
+  _registerAppsScriptCore(server, getCreds);
+  _registerAppsScriptExtra(server, getCreds);
+  _registerAppsScriptPhase2(server, getCreds);
+  _registerAppsScriptConsolidated(server, getCreds);
 }
