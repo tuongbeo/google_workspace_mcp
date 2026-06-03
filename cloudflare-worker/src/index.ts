@@ -35,13 +35,6 @@ router.get("/health", (c) => c.json({
   timestamp: new Date().toISOString(),
 }));
 
-router.get("/tools-manifest", (c) => c.json({
-  server: "google_workspace",
-  version: "3.0.0",
-  tool_count: TOOL_REGISTRY.length,
-  tools: TOOL_REGISTRY,
-}));
-
 router.get("/.well-known/oauth-protected-resource", (c) => {
   const base = c.env.PUBLIC_BASE_URL;
   c.header("Access-Control-Allow-Origin", "*");

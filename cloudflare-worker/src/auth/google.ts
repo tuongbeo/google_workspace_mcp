@@ -150,13 +150,25 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
 
 function errorPage(message: string): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Google Workspace MCP — Auth Error</title>
-<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;
-min-height:100vh;background:#f8f9fa}.card{background:#fff;border-radius:12px;padding:40px;
-box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:480px;text-align:center}
-h2{color:#d93025;margin-bottom:12px}p{color:#555;line-height:1.6}</style></head>
-<body><div class="card"><h2>Authentication Error</h2><p>${message}</p>
-<p style="margin-top:16px;font-size:13px">Please try disconnecting and reconnecting the connector in Claude.ai.</p>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    min-height:100vh;background:#ffffff;color:#111827}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:40px 48px;
+    box-shadow:0 1px 4px rgba(0,0,0,.06);max-width:480px;width:100%;text-align:center}
+  .icon{font-size:32px;margin-bottom:16px}
+  h2{font-size:18px;font-weight:600;color:#dc2626;margin-bottom:10px}
+  p{font-size:15px;color:#374151;line-height:1.6}
+  .hint{margin-top:16px;font-size:13px;color:#6b7280}
+</style></head>
+<body><div class="card">
+  <div class="icon">⚠️</div>
+  <h2>Authentication Error</h2>
+  <p>${message}</p>
+  <p class="hint">Please try disconnecting and reconnecting the connector in Claude.ai.</p>
 </div></body></html>`;
 }
 
