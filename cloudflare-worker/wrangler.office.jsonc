@@ -6,7 +6,7 @@
 
   // ── Non-sensitive vars ────────────────────────────────────────────────────────
   "vars": {
-    "GOOGLE_AUTH_BASE_URL": "https://google-auth.tuongbeo.workers.dev",
+    "GOOGLE_AUTH_BASE_URL": "https://auth.lens.io.vn",
     "PUBLIC_BASE_URL":      "https://office.lens.io.vn",
     "TOOLS_PRESET":         "all"
   },
