@@ -5,7 +5,7 @@
  * Services: Docs, Sheets, Slides, Drive (drive.file), Forms, AppsScript,
  *           Tasks, Contacts
  * Scopes:   drive.file, documents, spreadsheets, presentations, forms.body,
- *           script.projects/metrics/deployments, tasks, calendar, contacts
+ *           script.projects/metrics/deployments, tasks, contacts
  * Token namespace: "office"
  *
  * Excluded: Gmail, Chat (scope complexity / not needed for core workflow)
