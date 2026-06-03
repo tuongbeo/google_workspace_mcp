@@ -2,13 +2,12 @@
  * Office Agent — Durable Object for the Office worker.
  *
  * All-in-one Google Workspace agent.
- * Services: Docs, Sheets, Slides, Drive (drive.file), Forms, AppsScript,
- *           Tasks, Contacts
+ * Services: Docs, Sheets, Slides, Drive (drive.file), Forms, AppsScript, Tasks
  * Scopes:   drive.file, documents, spreadsheets, presentations, forms.body,
- *           script.projects/metrics/deployments, tasks, contacts
+ *           script.projects/metrics/deployments, tasks
  * Token namespace: "office"
  *
- * Excluded: Gmail, Chat (scope complexity / not needed for core workflow)
+ * Excluded: Gmail, Calendar, Chat, Contacts
  */
 
 import { McpAgent } from "agents/mcp";
@@ -23,7 +22,6 @@ import { registerFormsTools }      from "../../tools/forms";
 import { registerAppsScriptTools } from "../../tools/appsscript";
 import { registerTasksTools }      from "../../tools/tasks";
 import { registerCompositeTools }  from "../../tools/composite";
-import { registerContactsTools }   from "../../tools/contacts";
 
 // ── Tools excluded from Office Worker (lean set) ──────────────────────────────
 //
@@ -161,8 +159,6 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
       registerAppsScriptTools(withSkip(this.server, SKIP_APPSSCRIPT), getCreds);
     if (load("tasks"))
       registerTasksTools(this.server, getCreds);
-    if (load("contacts"))
-      registerContactsTools(this.server, getCreds);
     registerCompositeTools(this.server, getCreds);
   }
 }
