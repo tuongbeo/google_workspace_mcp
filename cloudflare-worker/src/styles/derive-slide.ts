@@ -25,34 +25,37 @@ export interface SlideTokens {
 
 export function deriveSlideTokens(colors: KeyColors, fonts: FontPair): SlideTokens {
   return {
+    // Font sizes aligned with Google Slides predefined layout defaults:
+    // coverTitle=36pt (Title placeholder), sectionTitle=28pt (Section Header layout),
+    // contentTitle=22pt (Title and Body layout), contentBody=15pt (body placeholder)
     coverBg:         colors.primaryDark,
     coverTitle: {
       color:      "#ffffff",
-      fontSize:   40,
+      fontSize:   36,
       bold:       true,
       fontFamily: fonts.heading,
     },
     coverSubtitle: {
       color:      colors.primaryLight,
-      fontSize:   20,
+      fontSize:   18,
       fontFamily: fonts.body,
     },
     sectionBg:      colors.primary,
     sectionTitle: {
       color:      "#ffffff",
-      fontSize:   32,
+      fontSize:   28,
       bold:       true,
       fontFamily: fonts.heading,
     },
     contentTitle: {
       color:      colors.primary,
-      fontSize:   24,
+      fontSize:   22,
       bold:       true,
       fontFamily: fonts.heading,
     },
     contentBody: {
       color:      colors.text,
-      fontSize:   16,
+      fontSize:   15,
       fontFamily: fonts.body,
     },
     accentColor:  colors.primary,

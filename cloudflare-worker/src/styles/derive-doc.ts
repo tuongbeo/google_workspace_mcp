@@ -22,10 +22,12 @@ export interface DocTokens {
 
 export function deriveDocTokens(colors: KeyColors, fonts: FontPair): DocTokens {
   return {
-    heading1: { color: colors.primary,     fontSize: 26, bold: true,  fontFamily: fonts.heading },
-    heading2: { color: colors.primary,     fontSize: 20, bold: true,  fontFamily: fonts.heading },
-    heading3: { color: colors.primaryDark, fontSize: 16, bold: true,  fontFamily: fonts.heading },
-    heading4: { color: colors.textMuted,   fontSize: 13, bold: true,  fontFamily: fonts.heading },
+    // Font sizes aligned with Google Docs Named Style defaults:
+    // H1=20pt, H2=16pt, H3=13pt(bold), H4=11pt(bold) — differentiated by color
+    heading1: { color: colors.primary,     fontSize: 20, bold: true,  fontFamily: fonts.heading },
+    heading2: { color: colors.primary,     fontSize: 16, bold: true,  fontFamily: fonts.heading },
+    heading3: { color: colors.primaryDark, fontSize: 13, bold: true,  fontFamily: fonts.heading },
+    heading4: { color: colors.textMuted,   fontSize: 11, bold: true,  fontFamily: fonts.heading },
     normal:   { color: colors.text,        fontSize: 11, fontFamily: fonts.body },
     tableHeader: {
       bgColor:   colors.primary,
