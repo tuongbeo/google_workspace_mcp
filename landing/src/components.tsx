@@ -136,13 +136,21 @@ export function Navbar() {
     <nav className="navbar">
       <div className="container navbar-inner">
         <a href="/" className="navbar-logo">
-          <div className="logo-icon">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M3 8 L8 3 L13 8 L8 13 Z" stroke="white" strokeWidth="1.5" fill="none"/>
-              <circle cx="8" cy="8" r="2" fill="white"/>
-            </svg>
-          </div>
-          Workspace Lens
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="28" height="28" fill="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="nav-g" x1="10" y1="60" x2="110" y2="60" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stopColor="#3B82F6"/>
+                <stop offset="100%" stopColor="#10B981"/>
+              </linearGradient>
+            </defs>
+            <rect width="120" height="120" rx="20" fill="#0f172a"/>
+            <rect x="15" y="15" width="90" height="90" rx="16" stroke="url(#nav-g)" strokeWidth="5" fill="none"/>
+            <circle cx="60" cy="60" r="24" stroke="#3B82F6" strokeWidth="4" fill="none"/>
+            <circle cx="60" cy="60" r="10" fill="#10B981"/>
+            <circle cx="90" cy="30" r="5" fill="#10B981"/>
+            <line x1="25" y1="48" x2="25" y2="72" stroke="#3B82F6" strokeWidth="4" strokeLinecap="round"/>
+          </svg>
+          <span>workspace<span style={{ color: '#10B981' }}>.</span><span style={{ color: '#3B82F6' }}>lens</span></span>
         </a>
         <ul className="navbar-links">
           <li><a href="#features">Features</a></li>
