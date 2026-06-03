@@ -1,39 +1,24 @@
-# ---- Python artefacts --------------------------------------------------
-__pycache__/
-*.py[cod]
-*.so
-.mcp.json
-claude.md
-.beads/*
-.beads/issues.jsonl
+# Cloudflare Worker
+cloudflare-worker/.wrangler/
+cloudflare-worker/node_modules/
+cloudflare-worker/coverage/
 
-# ---- Packaging ---------------------------------------------------------
-*.egg-info/
-build/
-dist/
+# Landing page
+landing/node_modules/
+landing/dist/
 
-# ---- Environments & tooling -------------------------------------------
+# Environment
 .env
-.venv/
-venv/
-.idea/
-.vscode/
+.env.*
+*.local
 
-# ---- macOS clutter -----------------------------------------------------
+# macOS
 .DS_Store
 
-# ---- Secrets -----------------------------------------------------------
+# Secrets
 client_secret.json
+.credentials/
 
-# ---- Logs --------------------------------------------------------------
-mcp_server_debug.log
-
-# ---- Local development files -------------------------------------------
-/.credentials
-/.claude
-.serena/
-Caddyfile
-ecosystem.config.cjs
-
-# ---- Agent instructions (not for distribution) -------------------------
+# Agent instructions
 .github/instructions/
+.beads/

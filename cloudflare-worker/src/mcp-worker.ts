@@ -74,7 +74,7 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
     registerContactsExtraTools(this.server, getCreds);
     registerAppsScriptTools(this.server, getCreds);
     registerAppsScriptExtraTools(this.server, getCreds);
-    registerSearchTools(this.server, getCreds, env);
+    registerSearchTools(this.server, getCreds, this.env);
     registerWorkspaceExtraTools(this.server, getCreds);
     registerDocsAdvancedTools(this.server, getCreds);
     registerDriveRevisionsTools(this.server, getCreds);

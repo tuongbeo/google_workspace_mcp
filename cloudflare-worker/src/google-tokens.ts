@@ -163,14 +163,14 @@ export async function getValidAccessToken(
     return updated.access_token;
   } catch (err) {
     // 5-min grace: tool error is better than connector disconnect
-    const staleSecs = now - record.expires_at;
+    const staleSecs = Math.floor(Date.now() / 1000) - expiresAtSec;
     if (staleSecs >= 0 && staleSecs < 300) {
       console.warn(`[tokens] refresh failed, stale token (${staleSecs}s) for ns=${namespace} sub=${sub}`);
       return record.access_token;
     }
     throw err;
   } finally {
-    await kv.delete(lockKey).catch(() => {});
+    await kv.delete(lock).catch(() => {});
   }
 }
 
