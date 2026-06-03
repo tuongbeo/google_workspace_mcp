@@ -2,9 +2,23 @@
  * sheets-engine/parser.ts
  * Parse CSV / JSON / Markdown table → ParsedSheet
  * Auto-detect column types from header keywords + value patterns
+ * Locale-aware number/date formats (Vietnamese vs default)
  */
 
 import { ColumnType, ParsedSheet, ParsedColumn, SheetData } from "./types";
+
+// ─── Vietnamese locale detection ─────────────────────────────────────────────
+
+// Vietnamese diacritics: tone marks + modified vowels
+const VI_DIACRITIC_RE = /[àáâãèéêìíòóôõùúýăđơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]/i;
+
+/**
+ * Returns true if any header contains Vietnamese diacritics.
+ * Used to switch date/currency formats to Vietnamese locale defaults.
+ */
+export function detectVietnamese(headers: string[]): boolean {
+  return headers.some(h => VI_DIACRITIC_RE.test(h));
+}
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
 
@@ -50,10 +64,10 @@ const OWNER_HEADERS    = /owner|assignee|author|contact|reporter|user|person|mem
 const BOOL_SET = new Set(["true","false","yes","no","0","1","active","inactive","on","off","✓","✗"]);
 
 function isNumericStr(v: string): boolean {
-  return v !== "" && !isNaN(Number(v.replace(/[$,%]/g, "")));
+  return v !== "" && !isNaN(Number(v.replace(/[$,%₫]/g, "")));
 }
 function isIntegerStr(v: string): boolean {
-  const n = Number(v.replace(/[$,%]/g, ""));
+  const n = Number(v.replace(/[$,%₫]/g, ""));
   return Number.isInteger(n);
 }
 function isISODate(v: string): boolean {
@@ -91,31 +105,43 @@ export function detectColumnType(
   if (DATE_HEADERS.test(header) || strVals.every(v => isISODate(v))) return "date";
 
   // Numeric
-  const allNumeric = strVals.every(v => isNumericStr(v.replace(/[$,%]/g, "")));
+  const allNumeric = strVals.every(v => isNumericStr(v.replace(/[$,%₫]/g, "")));
   if (allNumeric) {
+    // Vietnamese currency signal: header contains ₫ or VND, or value ends with ₫
+    const isVndHint = /vnd|vnđ|đồng|₫/i.test(header) || strVals.some(v => v.includes("₫"));
+    if (isVndHint) return "currency";
     if (CURRENCY_HEADERS.test(header) || strVals.some(v => v.startsWith("$"))) return "currency";
     if (PERCENT_HEADERS.test(header) || strVals.some(v => v.endsWith("%"))) return "percent";
-    const nums = strVals.map(v => Number(v.replace(/[$,%]/g, "")));
+    const nums = strVals.map(v => Number(v.replace(/[$,%₫]/g, "")));
     if (nums.every(n => n >= 0 && n <= 1)) return "percent";
     return strVals.every(v => isIntegerStr(v)) ? "integer" : "decimal";
   }
 
-  // Status: ≤8 unique string values
+  // Status: ≤8 unique short string values
   const unique = new Set(strVals);
-  // Status: ≤8 unique values AND all values are short strings (max 40 chars)
-  if (unique.size <= 8 && sv.every((v: string) => v.length <= 40)) return "status";
+  if (unique.size <= 8 && strVals.every(v => v.length <= 40)) return "status";
 
   return "text";
 }
 
-export function buildNumberFormat(type: ColumnType, override?: string): string | null {
+/**
+ * Return the Sheets number format string for a column type.
+ * @param type     Detected column type
+ * @param override Explicit format string from column config (takes precedence)
+ * @param isVi     True when Vietnamese locale detected — use DD/MM/YYYY and ₫ currency
+ */
+export function buildNumberFormat(
+  type: ColumnType,
+  override?: string,
+  isVi = false,
+): string | null {
   if (override) return override;
   switch (type) {
-    case "currency": return '"$"#,##0.00';
+    case "currency": return isVi ? '#,##0 [$₫-422]' : '"$"#,##0.00';
     case "percent":  return "0.0%";
     case "integer":  return "#,##0";
     case "decimal":  return "#,##0.00";
-    case "date":     return "MMM d, yyyy";
+    case "date":     return isVi ? "dd/MM/yyyy" : "MMM d, yyyy";
     default: return null;
   }
 }
@@ -143,6 +169,9 @@ export function parseInput(
   const headers = raw[0].map(h => String(h ?? ""));
   const rows = raw.slice(1);
 
+  // Detect locale from headers for number/date format defaults
+  const isVi = detectVietnamese(headers);
+
   const columns: ParsedColumn[] = headers.map((header, i) => {
     const values = rows.map(r => r[i] ?? null);
     const override = columnOverrides?.[i];
@@ -151,8 +180,10 @@ export function parseInput(
       .filter(v => v !== null && v !== "")
       .map(v => String(v));
     const unique = type === "status" ? [...new Set(strVals)] : undefined;
-    return { index: i, header, type, values, uniqueValues: unique };
+    // Pass locale-aware format: override > locale-default
+    const format = buildNumberFormat(type, override?.format, isVi) ?? undefined;
+    return { index: i, header, type, values, uniqueValues: unique, format };
   });
 
-  return { headers, rows, columns };
+  return { headers, rows, columns, isVi };
 }

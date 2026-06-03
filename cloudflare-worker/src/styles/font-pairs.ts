@@ -1,5 +1,14 @@
 /**
  * Font pair definitions for Google Workspace docs/slides
+ *
+ * All fonts are:
+ * - Free on Google Fonts
+ * - Available via Google Docs/Sheets/Slides API
+ * - Vietnamese-capable (Latin Extended + diacritics)
+ *
+ * Removed: Arial (too generic), Inter (overused AI aesthetic),
+ *          Georgia/Source Sans Pro (poor Vietnamese diacritics),
+ *          Proxima Nova (commercial), Be Vietnam Pro (unverified API availability)
  */
 
 export interface FontPair {
@@ -8,31 +17,39 @@ export interface FontPair {
   useCase: string;
 }
 
-export type FontPairName = "arial_roboto" | "georgia_source" | "inter_system" | "merriweather_open";
+export type FontPairName =
+  | "open_roboto"
+  | "raleway_noto"
+  | "merriweather_open"
+  | "mulish_nunito";
 
 export const FONT_PAIRS: Record<FontPairName, FontPair> = {
-  arial_roboto: {
-    heading: "Arial",
+  // Default: clean, professional, excellent Vietnamese support
+  open_roboto: {
+    heading: "Open Sans",
     body:    "Roboto",
-    useCase: "Corporate default",
+    useCase: "Business documents, default, excellent Vietnamese",
   },
-  georgia_source: {
-    heading: "Georgia",
-    body:    "Source Sans Pro",
-    useCase: "Editorial",
+  // Elegant display: Raleway (Vietnamese support since v4.0, by Vietnamese designer)
+  raleway_noto: {
+    heading: "Raleway",
+    body:    "Noto Sans",
+    useCase: "Elegant headings, maximum Unicode/Vietnamese coverage",
   },
-  inter_system: {
-    heading: "Inter",
-    body:    "Inter",
-    useCase: "Modern clean",
-  },
+  // Editorial: classic serif + clean sans
   merriweather_open: {
     heading: "Merriweather",
     body:    "Open Sans",
-    useCase: "Long-form",
+    useCase: "Long-form documents, editorial",
+  },
+  // Friendly: modern rounded, good for presentations
+  mulish_nunito: {
+    heading: "Mulish",
+    body:    "Nunito",
+    useCase: "Presentations, friendly tone",
   },
 };
 
 export function getFontPair(name?: string): FontPair {
-  return FONT_PAIRS[(name as FontPairName) || "arial_roboto"] ?? FONT_PAIRS.arial_roboto;
+  return FONT_PAIRS[(name as FontPairName) || "open_roboto"] ?? FONT_PAIRS.open_roboto;
 }

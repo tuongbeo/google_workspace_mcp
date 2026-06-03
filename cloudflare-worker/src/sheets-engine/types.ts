@@ -81,10 +81,14 @@ export interface ParsedColumn {
   type: ColumnType;
   values: (string | number | boolean | null)[];
   uniqueValues?: string[];
+  /** Pre-computed locale-aware Sheets number format string (e.g. "dd/MM/yyyy" for VI) */
+  format?: string;
 }
 
 export interface ParsedSheet {
   headers: string[];
   rows: (string | number | boolean | null)[][];
   columns: ParsedColumn[];
+  /** True when Vietnamese locale detected from headers — executor uses ₫/dd-MM-yyyy formats */
+  isVi?: boolean;
 }
