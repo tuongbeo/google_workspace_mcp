@@ -138,17 +138,37 @@ export function Navbar() {
         <a href="/" className="navbar-logo">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="28" height="28" fill="none" aria-hidden="true">
             <defs>
-              <linearGradient id="nav-g" x1="10" y1="60" x2="110" y2="60" gradientUnits="userSpaceOnUse">
+              <linearGradient id="nav-gd" x1="10" y1="60" x2="110" y2="60" gradientUnits="userSpaceOnUse">
                 <stop offset="0%" stopColor="#3B82F6"/>
                 <stop offset="100%" stopColor="#10B981"/>
               </linearGradient>
+              <linearGradient id="nav-gl" x1="10" y1="60" x2="110" y2="60" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stopColor="#2563eb"/>
+                <stop offset="100%" stopColor="#059669"/>
+              </linearGradient>
+              <style>{`
+                @media (prefers-color-scheme: dark) {
+                  .nb { fill: #0f172a; }
+                  .nf { stroke: url(#nav-gd); }
+                  .ni { stroke: #3B82F6; }
+                  .nd { fill: #10B981; }
+                  .nl { stroke: #3B82F6; }
+                }
+                @media (prefers-color-scheme: light) {
+                  .nb { fill: #f8fafc; }
+                  .nf { stroke: url(#nav-gl); }
+                  .ni { stroke: #2563eb; }
+                  .nd { fill: #059669; }
+                  .nl { stroke: #2563eb; }
+                }
+              `}</style>
             </defs>
-            <rect width="120" height="120" rx="20" fill="#0f172a"/>
-            <rect x="15" y="15" width="90" height="90" rx="16" stroke="url(#nav-g)" strokeWidth="5" fill="none"/>
-            <circle cx="60" cy="60" r="24" stroke="#3B82F6" strokeWidth="4" fill="none"/>
-            <circle cx="60" cy="60" r="10" fill="#10B981"/>
-            <circle cx="90" cy="30" r="5" fill="#10B981"/>
-            <line x1="25" y1="48" x2="25" y2="72" stroke="#3B82F6" strokeWidth="4" strokeLinecap="round"/>
+            <rect width="120" height="120" rx="20" className="nb"/>
+            <rect x="15" y="15" width="90" height="90" rx="16" className="nf" strokeWidth="5" fill="none"/>
+            <circle cx="60" cy="60" r="24" className="ni" strokeWidth="4" fill="none"/>
+            <circle cx="60" cy="60" r="10" className="nd"/>
+            <circle cx="90" cy="30" r="5" className="nd"/>
+            <line x1="25" y1="48" x2="25" y2="72" className="nl" strokeWidth="4" strokeLinecap="round"/>
           </svg>
           <span>workspace<span style={{ color: '#10B981' }}>.</span><span style={{ color: '#3B82F6' }}>lens</span></span>
         </a>
