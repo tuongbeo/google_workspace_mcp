@@ -46,6 +46,8 @@ export interface OverlayImage {
   height: number;
 }
 
+export type FontPairName = "open_roboto" | "raleway_noto" | "merriweather_open" | "mulish_nunito";
+
 export interface SheetData {
   name: string;
   data?: { headers: string[]; rows: (string | number | boolean | null)[][] };
@@ -56,6 +58,7 @@ export interface SheetData {
   total_rows?: number[];
   columns?: Record<number, ColumnConfig>;
   theme?: ThemeName;
+  font_pair?: FontPairName;
   alternating_rows?: boolean;
   freeze_rows?: number;
   freeze_cols?: number;

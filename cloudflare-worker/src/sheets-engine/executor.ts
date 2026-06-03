@@ -14,7 +14,7 @@ import { parseInput, buildNumberFormat } from "./parser";
 import { buildPersonChipCell, buildFileChipCell, isEmail, isDriveUrl } from "./chipRuns";
 import {
   WriteSheetInput, SheetData, ParsedSheet, ParsedColumn,
-  ColumnConfig, ColumnType, ChartConfig, ThemeName,
+  ColumnConfig, ColumnType, ChartConfig, ThemeName, FontPairName,
 } from "./types";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -189,6 +189,7 @@ async function pass3Styling(
   colConfigs: Record<number, ColumnConfig>,
   opts: {
     theme: ThemeName;
+    font_pair?: FontPairName;
     alternating_rows: boolean;
     freeze_rows: number;
     freeze_cols?: number;
@@ -208,7 +209,8 @@ async function pass3Styling(
 
   const themeKey: ThemeName = (opts.theme in THEMES ? opts.theme : "corporate") as ThemeName;
   const kc = THEMES[themeKey];
-  const tok = deriveSheetTokens(kc, FONT_PAIRS.arial_roboto);
+  const fp = FONT_PAIRS[(opts.font_pair ?? "open_roboto") as FontPairName] ?? FONT_PAIRS.open_roboto;
+  const tok = deriveSheetTokens(kc, fp);
   const reqs: any[] = [];
 
   // Header row
@@ -660,11 +662,13 @@ async function processOneSheet(
   }
   const parsed = parseInput(sheetData, colConfigs);
   const theme = (sheetData.theme ?? "corporate") as ThemeName;
+  const font_pair = (sheetData.font_pair ?? "open_roboto") as FontPairName;
   const position = sheetData.position ?? "replace";
 
   await pass2DataWrite(accessToken, spreadsheetId, sheetId, sheetName, parsed, colConfigs, position);
   await pass3Styling(accessToken, spreadsheetId, sheetId, sheetName, parsed, colConfigs, {
     theme,
+    font_pair,
     alternating_rows: sheetData.alternating_rows ?? true,
     freeze_rows: sheetData.freeze_rows ?? 1,
     freeze_cols: sheetData.freeze_cols,

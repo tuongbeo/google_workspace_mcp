@@ -1114,8 +1114,8 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
       theme: z.enum(["corporate", "modern", "warm", "nature", "minimal", "vibrant"])
         .optional().default("corporate")
         .describe("Visual theme for the document"),
-      font_pair: z.enum(["arial_roboto", "georgia_source", "inter_system", "merriweather_open"])
-        .optional().default("arial_roboto")
+      font_pair: z.enum(["open_roboto", "raleway_noto", "merriweather_open", "mulish_nunito"])
+        .optional().default("open_roboto")
         .describe("Heading and body font pair"),
 
       // Create mode
@@ -1150,7 +1150,7 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
     withErrorHandler(async ({
       content,
       theme = "corporate",
-      font_pair = "arial_roboto",
+      font_pair = "open_roboto",
       name,
       parent_folder_id,
       document_id,

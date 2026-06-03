@@ -888,6 +888,9 @@ function _registerWriteGoogleSheet(server: McpServer, getCreds: GetCredsFunc) {
         .describe("Per-column config keyed by 0-based index as string. E.g. {'0':{type:'currency'}}"),
       theme: z.enum(["corporate","modern","warm","nature","minimal","vibrant"])
         .optional().default("corporate"),
+      font_pair: z.enum(["open_roboto","raleway_noto","merriweather_open","mulish_nunito"])
+        .optional().default("open_roboto")
+        .describe("Font pair for header and body text"),
       alternating_rows: z.boolean().optional().default(true),
       freeze_rows: z.number().int().optional().default(1),
       freeze_cols: z.number().int().optional(),
@@ -932,6 +935,7 @@ function _registerWriteGoogleSheet(server: McpServer, getCreds: GetCredsFunc) {
           ? Object.fromEntries(Object.entries(params.columns).map(([k, v]) => [parseInt(k), v]))
           : undefined,
         theme: params.theme as any,
+        font_pair: params.font_pair as any,
         alternating_rows: params.alternating_rows,
         freeze_rows: params.freeze_rows,
         freeze_cols: params.freeze_cols,

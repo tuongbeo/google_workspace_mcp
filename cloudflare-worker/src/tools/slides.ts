@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { googleFetch, slidesRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
+import { THEMES, FONT_PAIRS, deriveSlideTokens } from "../styles";
 import type { GetCredsFunc } from "../types";
 
 function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
@@ -65,121 +66,272 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations.` }] };
   }));
 
-  server.tool("create_presentation_from_outline",
-    "Create a professional Google Slides presentation from a structured outline. " +
-    "Applies Anthropic PPTX design standards: 16:9 layout, consistent typography scale, " +
-    "7 color palettes and 4 font pairings from Anthropic PPTX skill, " +
-    "dark cover/section slides with light content slides (sandwich structure).",
+  server.tool("write_google_slide",
+    "Create or update a Google Slides presentation from a structured outline. " +
+    "6 themes (same as write_google_doc / write_google_sheet): corporate, modern, warm, nature, minimal, vibrant. " +
+    "4 font pairs: open_roboto, raleway_noto, merriweather_open, mulish_nunito. " +
+    "6 slide types: cover (dark bg + title + subtitle), section (dark bg + title), " +
+    "bullets (header bar + bullet list), two_column (header bar + left/right bullets), " +
+    "big_number (large stat + label), quote (dark bg + pull quote). " +
+    "Create new: provide title + slides[]. Update existing: provide presentation_id + slides[] (appends slides).",
     {
-      title: z.string(),
-      theme: z.enum(["midnight_executive","ocean_gradient","forest_moss","coral_energy","charcoal_minimal","teal_trust","warm_terracotta"])
-        .optional().default("midnight_executive")
-        .describe("Color palette: midnight_executive=navy/ice-blue, ocean_gradient=deep-blue/teal, forest_moss=green, coral_energy=coral/navy, charcoal_minimal=dark-gray, teal_trust=teal/seafoam, warm_terracotta=terracotta/sand"),
-      font_pair: z.enum(["arial_black_arial","georgia_calibri","calibri","trebuchet_calibri"])
-        .optional().default("arial_black_arial")
-        .describe("Font pairing: arial_black_arial=bold modern, georgia_calibri=classic, calibri=corporate, trebuchet_calibri=friendly"),
+      title: z.string().optional()
+        .describe("Presentation title — required when creating new (no presentation_id)"),
+      presentation_id: z.string().optional()
+        .describe("Existing presentation ID — provide to append slides to existing presentation"),
+      theme: z.enum(["corporate","modern","warm","nature","minimal","vibrant"])
+        .optional().default("corporate")
+        .describe("Visual theme — same palette as write_google_doc/write_google_sheet"),
+      font_pair: z.enum(["open_roboto","raleway_noto","merriweather_open","mulish_nunito"])
+        .optional().default("open_roboto")
+        .describe("Font pair for headings and body text"),
       slides: z.array(z.object({
         type: z.enum(["cover","section","bullets","two_column","big_number","quote"]),
         title: z.string(),
         subtitle: z.string().optional(),
         bullets: z.array(z.string()).optional(),
         bullets_right: z.array(z.string()).optional(),
-        stat: z.string().optional(),
-        stat_label: z.string().optional(),
-        quote_text: z.string().optional(),
-        quote_author: z.string().optional(),
+        stat: z.string().optional().describe("Large stat number for big_number slides"),
+        stat_label: z.string().optional().describe("Caption below stat"),
+        quote_text: z.string().optional().describe("Pull quote text"),
+        quote_author: z.string().optional().describe("Quote attribution"),
       })).min(1),
     },
     { readOnlyHint: false },
-    withErrorHandler(async ({ title, theme = "midnight_executive", font_pair = "arial_black_arial", slides }) => {
+    withErrorHandler(async ({ title, presentation_id, theme = "corporate", font_pair = "open_roboto", slides }) => {
       const { accessToken } = await getCreds();
-      const PALETTES: Record<string, { p: string; s: string }> = {
-        midnight_executive: { p: '1E2761', s: 'CADCFC' }, forest_moss: { p: '2C5F2D', s: '97BC62' },
-        coral_energy: { p: 'F96167', s: 'F9E795' }, ocean_gradient: { p: '065A82', s: '1C7293' },
-        charcoal_minimal: { p: '36454F', s: 'F2F2F2' }, teal_trust: { p: '028090', s: '00A896' },
-        warm_terracotta: { p: 'B85042', s: 'E7E8D1' },
-      };
-      const FONTS: Record<string, { h: string; b: string }> = {
-        arial_black_arial: { h: 'Arial Black', b: 'Arial' }, georgia_calibri: { h: 'Georgia', b: 'Calibri' },
-        calibri: { h: 'Calibri', b: 'Calibri Light' }, trebuchet_calibri: { h: 'Trebuchet MS', b: 'Calibri' },
-      };
-      const SZ = { coverTitle: 40, section: 36, slideTitle: 26, body: 16, bullet: 15, stat: 60, subtitle: 22 };
-      const W = 9144000, H = 5143500, M = 457200, CW = W - 2*M;
-      const pal = PALETTES[theme], fnt = FONTS[font_pair];
-      // BUG-004 FIX: Use counter + 8-char random to avoid collision in tight loops
+
+      if (!presentation_id && !title) {
+        throw new Error("Parameter 'title' is required when creating a new presentation (no presentation_id).");
+      }
+
+      // ── Resolve colors + fonts from styles/ system ───────────────────────
+      const kc  = THEMES[theme] ?? THEMES.corporate;
+      const fp  = FONT_PAIRS[font_pair as keyof typeof FONT_PAIRS] ?? FONT_PAIRS.open_roboto;
+      const tok = deriveSlideTokens(kc, fp);
+
+      // ── Presentation dimensions (16:9 standard) ───────────────────────────
+      const W = 9144000, H = 5143500, M = 457200, CW = W - 2 * M;
+
+      // ── Helper counter for unique object IDs ──────────────────────────────
       let _uidC = 0;
       function uid(p: string) { return `${p}_${++_uidC}_${Math.random().toString(36).slice(2,10)}`; }
-      function rgb(hex: string) { return { red: parseInt(hex.slice(0,2),16)/255, green: parseInt(hex.slice(2,4),16)/255, blue: parseInt(hex.slice(4,6),16)/255 }; }
-      function bg(sid: string, hex: string) { return { updatePageProperties: { objectId: sid, pageProperties: { pageBackgroundFill: { solidFill: { color: { rgbColor: rgb(hex) } } } }, fields: 'pageBackgroundFill' } }; }
+
+      function rgbHex(hex: string) {
+        const h = hex.replace('#', '');
+        return { red: parseInt(h.slice(0,2),16)/255, green: parseInt(h.slice(2,4),16)/255, blue: parseInt(h.slice(4,6),16)/255 };
+      }
+      function bgReq(sid: string, hex: string) {
+        return { updatePageProperties: { objectId: sid, pageProperties: { pageBackgroundFill: { solidFill: { color: { rgbColor: rgbHex(hex) } } } }, fields: 'pageBackgroundFill' } };
+      }
       function tb(id: string, pid: string, x: number, y: number, w: number, h: number) {
         return { createShape: { objectId: id, shapeType: 'TEXT_BOX', elementProperties: { pageObjectId: pid, size: { width: { magnitude: w, unit: 'EMU' }, height: { magnitude: h, unit: 'EMU' } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: 'EMU' } } } };
       }
       function rect(id: string, pid: string, x: number, y: number, w: number, h: number, hex: string) {
         return [
           { createShape: { objectId: id, shapeType: 'RECTANGLE', elementProperties: { pageObjectId: pid, size: { width: { magnitude: w, unit: 'EMU' }, height: { magnitude: h, unit: 'EMU' } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: 'EMU' } } } },
-          { updateShapeProperties: { objectId: id, shapeProperties: { shapeBackgroundFill: { solidFill: { color: { rgbColor: rgb(hex) } } } }, fields: 'shapeBackgroundFill' } },
+          { updateShapeProperties: { objectId: id, shapeProperties: { shapeBackgroundFill: { solidFill: { color: { rgbColor: rgbHex(hex) } } } }, fields: 'shapeBackgroundFill' } },
         ];
       }
       function ins(id: string, text: string) { return { insertText: { objectId: id, insertionIndex: 0, text } }; }
-      function sty(id: string, s: number, e: number, opts: { f?: string; sz?: number; c?: string; bold?: boolean; italic?: boolean }) {
+      function sty(id: string, s: number, e: number, o: { f?: string; sz?: number; c?: string; bold?: boolean; italic?: boolean }) {
         const style: Record<string,unknown> = {}, fields: string[] = [];
-        if (opts.f)  { style.fontFamily = opts.f; fields.push('fontFamily'); }
-        if (opts.sz) { style.fontSize = { magnitude: opts.sz, unit: 'PT' }; fields.push('fontSize'); }
-        if (opts.c)  { style.foregroundColor = { opaqueColor: { rgbColor: rgb(opts.c) } }; fields.push('foregroundColor'); }
-        if (opts.bold !== undefined)   { style.bold   = opts.bold;   fields.push('bold'); }
-        if (opts.italic !== undefined) { style.italic = opts.italic; fields.push('italic'); }
+        if (o.f)   { style.fontFamily = o.f; fields.push('fontFamily'); }
+        if (o.sz)  { style.fontSize = { magnitude: o.sz, unit: 'PT' }; fields.push('fontSize'); }
+        if (o.c)   { style.foregroundColor = { opaqueColor: { rgbColor: rgbHex(o.c) } }; fields.push('foregroundColor'); }
+        if (o.bold !== undefined)   { style.bold   = o.bold;   fields.push('bold'); }
+        if (o.italic !== undefined) { style.italic = o.italic; fields.push('italic'); }
         return { updateTextStyle: { objectId: id, textRange: { type: 'FIXED_RANGE', startIndex: s, endIndex: e }, style, fields: fields.join(',') } };
       }
       function al(id: string, s: number, e: number, a: 'CENTER'|'START') {
         return { updateParagraphStyle: { objectId: id, textRange: { type: 'FIXED_RANGE', startIndex: s, endIndex: e }, style: { alignment: a }, fields: 'alignment' } };
       }
-      const pres = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as any;
-      const presId: string = pres.presentationId;
-      const defSlide = pres.slides?.[0]?.objectId;
+
+      // ── Colors from token system ──────────────────────────────────────────
+      const darkBg   = tok.coverBg.replace('#','');      // cover + section bg
+      const accentBg = tok.sectionBg.replace('#','');    // header bar on content slides
+      const lightBg  = tok.defaultBg.replace('#','');    // content slide bg (white)
+      const accentTxt = tok.sectionTitle.color.replace('#','');   // always white on dark
+      const bodyClr  = tok.contentBody.color.replace('#','');
+      const titleClr = tok.contentTitle.color.replace('#','');
+      const subClr   = tok.coverSubtitle.color.replace('#','');
+
+      // ── Font sizes (from token + sensible scale) ──────────────────────────
+      const SZ = {
+        coverTitle:  tok.coverTitle.fontSize,
+        sectionTitle: tok.sectionTitle.fontSize,
+        slideTitle:  tok.contentTitle.fontSize,
+        bullet:      tok.contentBody.fontSize,
+        subtitle:    tok.coverSubtitle.fontSize,
+        stat:        56,
+        body:        tok.contentBody.fontSize,
+      };
+
+      // ── Get or create presentation ────────────────────────────────────────
+      let presId: string;
+      let isCreate = !presentation_id;
+
+      if (presentation_id) {
+        presId = presentation_id;
+      } else {
+        const pres = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as any;
+        presId = pres.presentationId;
+        // Delete default blank slide when creating fresh
+        const defSlide = pres.slides?.[0]?.objectId;
+        if (defSlide) {
+          await slidesRequest(accessToken, presId, ":batchUpdate", "POST", {
+            requests: [{ deleteObject: { objectId: defSlide } }]
+          });
+        }
+      }
+
+      // ── Build slide requests ──────────────────────────────────────────────
       const reqs: any[] = [];
-      if (defSlide) reqs.push({ deleteObject: { objectId: defSlide } });
+
       for (const slide of slides) {
         const sid = uid('sl');
         reqs.push({ createSlide: { objectId: sid, slideLayoutReference: { predefinedLayout: 'BLANK' } } });
+
         if (slide.type === 'cover') {
-          reqs.push(bg(sid, pal.p));
-          const tid = uid('t'); reqs.push(tb(tid,sid,M,Math.round(H*.28),CW,Math.round(H*.28)),ins(tid,slide.title),sty(tid,0,slide.title.length,{f:fnt.h,sz:SZ.coverTitle,c:'FFFFFF',bold:true}),al(tid,0,slide.title.length,'CENTER'));
-          if (slide.subtitle) { const subid=uid('s'); reqs.push(tb(subid,sid,M,Math.round(H*.62),CW,Math.round(H*.18)),ins(subid,slide.subtitle),sty(subid,0,slide.subtitle.length,{f:fnt.b,sz:SZ.subtitle,c:pal.s}),al(subid,0,slide.subtitle.length,'CENTER')); }
+          reqs.push(bgReq(sid, tok.coverBg));
+          const tid = uid('t');
+          reqs.push(
+            tb(tid, sid, M, Math.round(H * .28), CW, Math.round(H * .28)),
+            ins(tid, slide.title),
+            sty(tid, 0, slide.title.length, { f: fp.heading, sz: SZ.coverTitle, c: accentTxt, bold: true }),
+            al(tid, 0, slide.title.length, 'CENTER'),
+          );
+          if (slide.subtitle) {
+            const subid = uid('s');
+            reqs.push(
+              tb(subid, sid, M, Math.round(H * .62), CW, Math.round(H * .18)),
+              ins(subid, slide.subtitle),
+              sty(subid, 0, slide.subtitle.length, { f: fp.body, sz: SZ.subtitle, c: subClr }),
+              al(subid, 0, slide.subtitle.length, 'CENTER'),
+            );
+          }
         } else if (slide.type === 'section') {
-          reqs.push(bg(sid, pal.p));
-          const tid=uid('t'); reqs.push(tb(tid,sid,M,Math.round(H*.33),CW,Math.round(H*.34)),ins(tid,slide.title),sty(tid,0,slide.title.length,{f:fnt.h,sz:SZ.section,c:'FFFFFF',bold:true}),al(tid,0,slide.title.length,'CENTER'));
-          if (slide.subtitle) { const subid=uid('s'); reqs.push(tb(subid,sid,M,Math.round(H*.70),CW,Math.round(H*.15)),ins(subid,slide.subtitle),sty(subid,0,slide.subtitle.length,{f:fnt.b,sz:SZ.body,c:pal.s}),al(subid,0,slide.subtitle.length,'CENTER')); }
+          reqs.push(bgReq(sid, tok.sectionBg));
+          const tid = uid('t');
+          reqs.push(
+            tb(tid, sid, M, Math.round(H * .33), CW, Math.round(H * .34)),
+            ins(tid, slide.title),
+            sty(tid, 0, slide.title.length, { f: fp.heading, sz: SZ.sectionTitle, c: accentTxt, bold: true }),
+            al(tid, 0, slide.title.length, 'CENTER'),
+          );
+          if (slide.subtitle) {
+            const subid = uid('s');
+            reqs.push(
+              tb(subid, sid, M, Math.round(H * .70), CW, Math.round(H * .15)),
+              ins(subid, slide.subtitle),
+              sty(subid, 0, slide.subtitle.length, { f: fp.body, sz: SZ.body, c: subClr }),
+              al(subid, 0, slide.subtitle.length, 'CENTER'),
+            );
+          }
         } else if (slide.type === 'bullets' || slide.type === 'two_column') {
-          reqs.push(bg(sid,'FFFFFF'));
-          const barid=uid('bar'); reqs.push(...rect(barid,sid,0,0,W,Math.round(H*.17),pal.p));
-          const tid=uid('t'); reqs.push(tb(tid,sid,M,Math.round(H*.03),CW,Math.round(H*.13)),ins(tid,slide.title),sty(tid,0,slide.title.length,{f:fnt.h,sz:SZ.slideTitle,c:'FFFFFF',bold:true}));
-          if (slide.type==='bullets' && slide.bullets?.length) {
-            const bid=uid('b'); const bt=slide.bullets.join('\n');
-            reqs.push(tb(bid,sid,M,Math.round(H*.21),CW,Math.round(H*.70)),ins(bid,bt));
-            let idx=0; for(const b of slide.bullets){reqs.push(sty(bid,idx,idx+b.length,{f:fnt.b,sz:SZ.bullet,c:'1F2937'}),al(bid,idx,idx+b.length,'START'));idx+=b.length+1;}
-          } else if (slide.type==='two_column') {
-            const cw=Math.round(CW*.46),gap=Math.round(CW*.08);
-            if(slide.bullets?.length){const lid=uid('l');const lt=slide.bullets.join('\n');reqs.push(tb(lid,sid,M,Math.round(H*.21),cw,Math.round(H*.70)),ins(lid,lt));let idx=0;for(const b of slide.bullets){reqs.push(sty(lid,idx,idx+b.length,{f:fnt.b,sz:SZ.bullet,c:'1F2937'}));idx+=b.length+1;}}
-            if(slide.bullets_right?.length){const rid=uid('r');const rt=slide.bullets_right.join('\n');reqs.push(tb(rid,sid,M+cw+gap,Math.round(H*.21),cw,Math.round(H*.70)),ins(rid,rt));let idx=0;for(const b of slide.bullets_right){reqs.push(sty(rid,idx,idx+b.length,{f:fnt.b,sz:SZ.bullet,c:'1F2937'}));idx+=b.length+1;}}
+          reqs.push(bgReq(sid, lightBg));
+          const barid = uid('bar');
+          reqs.push(...rect(barid, sid, 0, 0, W, Math.round(H * .17), accentBg));
+          const tid = uid('t');
+          reqs.push(
+            tb(tid, sid, M, Math.round(H * .03), CW, Math.round(H * .13)),
+            ins(tid, slide.title),
+            sty(tid, 0, slide.title.length, { f: fp.heading, sz: SZ.slideTitle, c: accentTxt, bold: true }),
+          );
+          if (slide.type === 'bullets' && slide.bullets?.length) {
+            const bid = uid('b');
+            const bt = slide.bullets.join('\n');
+            reqs.push(tb(bid, sid, M, Math.round(H * .21), CW, Math.round(H * .70)), ins(bid, bt));
+            let idx = 0;
+            for (const b of slide.bullets) {
+              reqs.push(sty(bid, idx, idx + b.length, { f: fp.body, sz: SZ.bullet, c: bodyClr }), al(bid, idx, idx + b.length, 'START'));
+              idx += b.length + 1;
+            }
+          } else if (slide.type === 'two_column') {
+            const cw = Math.round(CW * .46), gap = Math.round(CW * .08);
+            if (slide.bullets?.length) {
+              const lid = uid('l');
+              const lt = slide.bullets.join('\n');
+              reqs.push(tb(lid, sid, M, Math.round(H * .21), cw, Math.round(H * .70)), ins(lid, lt));
+              let idx = 0;
+              for (const b of slide.bullets) {
+                reqs.push(sty(lid, idx, idx + b.length, { f: fp.body, sz: SZ.bullet, c: bodyClr }));
+                idx += b.length + 1;
+              }
+            }
+            if (slide.bullets_right?.length) {
+              const rid = uid('r');
+              const rt = slide.bullets_right.join('\n');
+              reqs.push(tb(rid, sid, M + cw + gap, Math.round(H * .21), cw, Math.round(H * .70)), ins(rid, rt));
+              let idx = 0;
+              for (const b of slide.bullets_right) {
+                reqs.push(sty(rid, idx, idx + b.length, { f: fp.body, sz: SZ.bullet, c: bodyClr }));
+                idx += b.length + 1;
+              }
+            }
           }
         } else if (slide.type === 'big_number') {
-          reqs.push(bg(sid,'FFFFFF'));
-          const tid=uid('t'); reqs.push(tb(tid,sid,M,Math.round(H*.07),CW,Math.round(H*.15)),ins(tid,slide.title),sty(tid,0,slide.title.length,{f:fnt.h,sz:SZ.slideTitle,c:pal.p,bold:true}),al(tid,0,slide.title.length,'CENTER'));
-          if(slide.stat){const s2=uid('st');reqs.push(tb(s2,sid,M,Math.round(H*.27),CW,Math.round(H*.42)),ins(s2,slide.stat),sty(s2,0,slide.stat.length,{f:fnt.h,sz:SZ.stat,c:pal.p,bold:true}),al(s2,0,slide.stat.length,'CENTER'));}
-          if(slide.stat_label){const lid=uid('lb');reqs.push(tb(lid,sid,M,Math.round(H*.72),CW,Math.round(H*.15)),ins(lid,slide.stat_label),sty(lid,0,slide.stat_label.length,{f:fnt.b,sz:SZ.body,c:'6B7280'}),al(lid,0,slide.stat_label.length,'CENTER'));}
+          reqs.push(bgReq(sid, lightBg));
+          const tid = uid('t');
+          reqs.push(
+            tb(tid, sid, M, Math.round(H * .07), CW, Math.round(H * .15)),
+            ins(tid, slide.title),
+            sty(tid, 0, slide.title.length, { f: fp.heading, sz: SZ.slideTitle, c: titleClr, bold: true }),
+            al(tid, 0, slide.title.length, 'CENTER'),
+          );
+          if (slide.stat) {
+            const s2 = uid('st');
+            reqs.push(
+              tb(s2, sid, M, Math.round(H * .27), CW, Math.round(H * .42)),
+              ins(s2, slide.stat),
+              sty(s2, 0, slide.stat.length, { f: fp.heading, sz: SZ.stat, c: titleClr, bold: true }),
+              al(s2, 0, slide.stat.length, 'CENTER'),
+            );
+          }
+          if (slide.stat_label) {
+            const lid = uid('lb');
+            reqs.push(
+              tb(lid, sid, M, Math.round(H * .72), CW, Math.round(H * .15)),
+              ins(lid, slide.stat_label),
+              sty(lid, 0, slide.stat_label.length, { f: fp.body, sz: SZ.body, c: bodyClr }),
+              al(lid, 0, slide.stat_label.length, 'CENTER'),
+            );
+          }
         } else if (slide.type === 'quote') {
-          reqs.push(bg(sid,pal.p));
-          const qt=`"${slide.quote_text||slide.title}"`;
-          const qid=uid('q'); reqs.push(tb(qid,sid,M,Math.round(H*.2),CW,Math.round(H*.45)),ins(qid,qt),sty(qid,0,qt.length,{f:fnt.b,sz:SZ.subtitle,c:'FFFFFF',italic:true}),al(qid,0,qt.length,'CENTER'));
-          if(slide.quote_author){const ad=`— ${slide.quote_author}`;const aid=uid('a');reqs.push(tb(aid,sid,M,Math.round(H*.70),CW,Math.round(H*.14)),ins(aid,ad),sty(aid,0,ad.length,{f:fnt.b,sz:SZ.body,c:pal.s}),al(aid,0,ad.length,'CENTER'));}
+          reqs.push(bgReq(sid, tok.coverBg));
+          const qt = `"${slide.quote_text || slide.title}"`;
+          const qid = uid('q');
+          reqs.push(
+            tb(qid, sid, M, Math.round(H * .2), CW, Math.round(H * .45)),
+            ins(qid, qt),
+            sty(qid, 0, qt.length, { f: fp.body, sz: SZ.subtitle, c: accentTxt, italic: true }),
+            al(qid, 0, qt.length, 'CENTER'),
+          );
+          if (slide.quote_author) {
+            const ad = `— ${slide.quote_author}`;
+            const aid = uid('a');
+            reqs.push(
+              tb(aid, sid, M, Math.round(H * .70), CW, Math.round(H * .14)),
+              ins(aid, ad),
+              sty(aid, 0, ad.length, { f: fp.body, sz: SZ.body, c: subClr }),
+              al(aid, 0, ad.length, 'CENTER'),
+            );
+          }
         }
       }
+
       await slidesRequest(accessToken, presId, ":batchUpdate", "POST", { requests: reqs });
+
+      const presUrl = `https://docs.google.com/presentation/d/${presId}/edit`;
       return { content: [{ type: "text", text: [
-        `Presentation created: "${title}"`, `ID: ${presId}`,
-        `Theme: ${theme} | Fonts: ${fnt.h} / ${fnt.b}`, `Slides: ${slides.length}`,
-        `URL: https://docs.google.com/presentation/d/${presId}/edit`, "",
-        "Slide outline:", ...slides.map((s,i) => `  ${i+1}. [${s.type}] ${s.title}`),
+        `Presentation ${isCreate ? "created" : "updated"}: "${title ?? presId}"`,
+        `ID: ${presId}`,
+        `Theme: ${theme} | Font: ${fp.heading} / ${fp.body}`,
+        `Slides added: ${slides.length}`,
+        `URL: ${presUrl}`,
+        "",
+        "Slide outline:",
+        ...slides.map((s, i) => `  ${i + 1}. [${s.type}] ${s.title}`),
       ].join("\n") }] };
     })
   );
