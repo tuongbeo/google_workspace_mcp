@@ -1,13 +1,14 @@
 /**
  * Office Agent — Durable Object for the Office worker.
  *
- * All-in-one Google Workspace agent (replaces workspace + plan + social workers).
- * Services: Docs, Sheets, Slides, Drive, Forms, AppsScript, Tasks,
- *           Gmail, Calendar, Chat, Contacts, Search
- * Scopes:   drive.file (non-sensitive), documents, spreadsheets, presentations,
- *           forms, script.*, tasks, gmail.modify, gmail.send, gmail.settings.basic,
- *           calendar, chat.messages, chat.spaces, contacts
+ * All-in-one Google Workspace agent.
+ * Services: Docs, Sheets, Slides, Drive (drive.file), Forms, AppsScript,
+ *           Tasks, Contacts
+ * Scopes:   drive.file, documents, spreadsheets, presentations, forms.body,
+ *           script.projects/metrics/deployments, tasks, calendar, contacts
  * Token namespace: "office"
+ *
+ * Excluded: Gmail, Chat (scope complexity / not needed for core workflow)
  */
 
 import { McpAgent } from "agents/mcp";
@@ -22,11 +23,7 @@ import { registerFormsTools }      from "../../tools/forms";
 import { registerAppsScriptTools } from "../../tools/appsscript";
 import { registerTasksTools }      from "../../tools/tasks";
 import { registerCompositeTools }  from "../../tools/composite";
-import { registerGmailTools }      from "../../tools/gmail";
-import { registerCalendarTools }   from "../../tools/calendar";
-import { registerChatTools }       from "../../tools/chat";
 import { registerContactsTools }   from "../../tools/contacts";
-import { registerSearchTools }     from "../../tools/search";
 
 // ── Tools excluded from Office Worker (lean set) ──────────────────────────────
 //
@@ -164,16 +161,8 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
       registerAppsScriptTools(withSkip(this.server, SKIP_APPSSCRIPT), getCreds);
     if (load("tasks"))
       registerTasksTools(this.server, getCreds);
-    if (load("gmail"))
-      registerGmailTools(this.server, getCreds);
-    if (load("calendar"))
-      registerCalendarTools(this.server, getCreds);
-    if (load("chat"))
-      registerChatTools(this.server, getCreds);
     if (load("contacts"))
       registerContactsTools(this.server, getCreds);
-    if (load("search"))
-      registerSearchTools(this.server, getCreds, this.env);
     registerCompositeTools(this.server, getCreds);
   }
 }
