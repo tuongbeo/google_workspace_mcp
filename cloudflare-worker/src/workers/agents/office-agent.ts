@@ -122,14 +122,14 @@ const SKIP_APPSSCRIPT = new Set([
 
 function withSkip(server: McpServer, skip: Set<string>): McpServer {
   if (skip.size === 0) return server;
-  const orig = (server as any).tool.bind(server);
-  (server as any).tool = (name: string, ...args: any[]) => {
+  const orig = server.tool.bind(server);
+  server.tool = ((name: string, ...args: unknown[]) => {
     if (skip.has(name)) {
       console.log(`[office-agent] skipping tool: ${name}`);
       return;
     }
-    return orig(name, ...args);
-  };
+    return (orig as (...a: unknown[]) => unknown)(name, ...args);
+  }) as typeof server.tool;
   return server;
 }
 
@@ -139,7 +139,7 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
   server = new McpServer({
     name:    "mcp-office",
     version: "1.0.0",
-  } as any);
+  });
 
   async init() {
     if (!this.props) throw new Error("OfficeAgent.init() called before OAuth props were set");

@@ -155,7 +155,7 @@ export function parseInput(
   let raw: (string | number | boolean | null)[][];
 
   if (input.data) {
-    raw = [input.data.headers as any[], ...input.data.rows];
+    raw = [input.data.headers, ...input.data.rows];
   } else if (input.csv) {
     raw = parseCSV(input.csv);
   } else if (input.markdown_table) {

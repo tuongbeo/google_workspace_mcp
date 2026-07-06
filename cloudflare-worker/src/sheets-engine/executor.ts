@@ -16,6 +16,7 @@ import {
   WriteSheetInput, SheetData, ParsedSheet, ParsedColumn,
   ColumnConfig, ColumnType, ChartConfig, ThemeName, FontPairName,
 } from "./types";
+import type { Spreadsheet, SheetInfo, SheetsBatchUpdateResponse } from "../tools/google-api-types";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -283,8 +284,8 @@ async function pass3Styling(
   if (opts.alternating_rows && nRows > 0) {
     try {
       const info = await sheetsRequest(accessToken, spreadsheetId,
-        "?fields=sheets(properties.sheetId,bandedRanges)") as any;
-      const sheet = (info.sheets || []).find((s: any) => s.properties?.sheetId === sheetId);
+        "?fields=sheets(properties.sheetId,bandedRanges)") as Spreadsheet;
+      const sheet = (info.sheets || []).find(s => s.properties?.sheetId === sheetId);
       for (const br of (sheet?.bandedRanges || [])) {
         if (br.bandedRangeId) reqs.push({ deleteBanding: { bandedRangeId: br.bandedRangeId } });
       }
@@ -698,7 +699,7 @@ export async function executeWriteSheet(
     : [{ ...input, name: input.sheet_name ?? "Sheet1" } as SheetData];
 
   let spreadsheetId: string;
-  let createdSheets: any[];
+  let createdSheets: SheetInfo[];
 
   if (isCreate) {
     if (!input.name) throw new Error("Parameter 'name' required when creating new spreadsheet");
@@ -708,34 +709,34 @@ export async function executeWriteSheet(
         properties: { title: input.name },
         sheets: sheetsList.map((s, i) => ({ properties: { title: s.name, index: i } })),
       },
-    ) as any;
-    spreadsheetId = result.spreadsheetId;
-    createdSheets = result.sheets;
+    ) as Spreadsheet;
+    spreadsheetId = result.spreadsheetId!;
+    createdSheets = result.sheets ?? [];
   } else {
     spreadsheetId = input.spreadsheet_id!;
     const info = await sheetsRequest(accessToken, spreadsheetId,
-      "?fields=sheets(properties(sheetId,title))") as any;
-    createdSheets = info.sheets || [];
+      "?fields=sheets(properties(sheetId,title))") as Spreadsheet;
+    createdSheets = info.sheets ?? [];
     // Ensure target tabs exist
     for (const s of sheetsList) {
-      const exists = createdSheets.find((sh: any) => sh.properties?.title === s.name);
+      const exists = createdSheets.find(sh => sh.properties?.title === s.name);
       if (!exists) {
         const r = await batchUpdate(accessToken, spreadsheetId,
-          [{ addSheet: { properties: { title: s.name } } }]) as any;
-        createdSheets.push(r.replies?.[0]?.addSheet);
+          [{ addSheet: { properties: { title: s.name } } }]) as SheetsBatchUpdateResponse;
+        if (r.replies?.[0]?.addSheet) createdSheets.push(r.replies[0].addSheet);
       }
     }
   }
 
   const summary: string[] = [];
   for (const sheetDef of sheetsList) {
-    const meta = createdSheets.find((s: any) => s.properties?.title === sheetDef.name);
+    const meta = createdSheets.find(s => s.properties?.title === sheetDef.name);
     const sheetId: number = meta?.properties?.sheetId ?? 0;
 
     // Inherit top-level input fields if sheet doesn't define its own
     const merged: SheetData = {
       ...sheetDef,
-      data: sheetDef.data ?? (input.data as any),
+      data: sheetDef.data ?? input.data,
       csv: sheetDef.csv ?? input.csv,
       markdown_table: sheetDef.markdown_table ?? input.markdown_table,
       columns: sheetDef.columns ?? input.columns,

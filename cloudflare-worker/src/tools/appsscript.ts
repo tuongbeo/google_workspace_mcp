@@ -7,6 +7,11 @@ import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  DriveFileListResponse, ScriptProjectContent, ScriptProject, ScriptRunResponse,
+  ScriptDeployment, ScriptDeploymentListResponse, ScriptVersion, ScriptVersionListResponse,
+  ScriptProcessListResponse, ScriptMetrics, ScriptTrigger, ScriptTriggerListResponse,
+} from "./google-api-types";
 
 const SCRIPT_BASE = "https://script.googleapis.com/v1";
 
@@ -17,10 +22,10 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ page_size = 20 }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ mimeType: "application/vnd.google-apps.script", pageSize: String(page_size), fields: "files(id,name,modifiedTime,webViewLink)" });
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: "No Apps Script projects found." }] };
-    const lines = files.map((f: any) => `- ${f.name}\n  ID: ${f.id}\n  Modified: ${f.modifiedTime}\n  Link: ${f.webViewLink}`);
+    const lines = files.map(f => `- ${f.name}\n  ID: ${f.id}\n  Modified: ${f.modifiedTime}\n  Link: ${f.webViewLink}`);
     return { content: [{ type: "text", text: `Apps Script Projects (${files.length}):\n\n${lines.join("\n\n")}` }] };
   }));
 
@@ -28,10 +33,10 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     script_id: z.string().describe("Script project ID (from Drive file ID)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as ScriptProjectContent;
     const lines = [`Script ID: ${script_id}`, `Files: ${(data.files || []).length}`, ""];
     for (const f of data.files || []) {
-      lines.push(`--- ${f.name}.${f.type === "SERVER_JS" ? "gs" : f.type.toLowerCase()} ---`);
+      lines.push(`--- ${f.name}.${f.type === "SERVER_JS" ? "gs" : (f.type || "").toLowerCase()} ---`);
       lines.push((f.source || "").substring(0, 500));
       lines.push("");
     }
@@ -43,8 +48,8 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     file_name: z.string().describe("File name (without extension)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, file_name }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
-    const file = (data.files || []).find((f: any) => f.name === file_name);
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as ScriptProjectContent;
+    const file = (data.files || []).find(f => f.name === file_name);
     if (!file) return { content: [{ type: "text", text: `File "${file_name}" not found in project.` }] };
     return { content: [{ type: "text", text: `${file.name} (${file.type}):\n\n${file.source || ""}` }] };
   }));
@@ -56,7 +61,7 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { title };
     if (parent_id) body.parentId = parent_id;
-    const result = await googleFetch(`${SCRIPT_BASE}/projects`, accessToken, "POST", body) as any;
+    const result = await googleFetch(`${SCRIPT_BASE}/projects`, accessToken, "POST", body) as ScriptProject;
     return { content: [{ type: "text", text: `Script project created: "${result.title}"\nID: ${result.scriptId}\nURL: https://script.google.com/d/${result.scriptId}/edit` }] };
   }));
 
@@ -69,11 +74,11 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     })).describe("Files to write (replaces existing files with same name)"),
   }, withErrorHandler(async ({ script_id, files }) => {
     const { accessToken } = await getCreds();
-    const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as any;
+    const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/content`, accessToken) as ScriptProjectContent;
     const existingFiles = existing.files || [];
     const merged = [...existingFiles];
     for (const newFile of files) {
-      const idx = merged.findIndex((f: any) => f.name === newFile.name);
+      const idx = merged.findIndex(f => f.name === newFile.name);
       if (idx >= 0) merged[idx] = { ...merged[idx], source: newFile.source };
       else merged.push({ name: newFile.name, type: newFile.type, source: newFile.source });
     }
@@ -90,7 +95,7 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const result = await googleFetch(`${SCRIPT_BASE}/scripts/${script_id}:run`, accessToken, "POST", {
       function: function_name, parameters, devMode: dev_mode,
-    }) as any;
+    }) as ScriptRunResponse;
     if (result.error) {
       const err = result.error.details?.[0];
       return { content: [{ type: "text", text: `Script error: ${err?.errorMessage || JSON.stringify(result.error)}\nType: ${err?.errorType || "UNKNOWN"}` }] };
@@ -103,10 +108,10 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     script_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken) as ScriptDeploymentListResponse;
     const deployments = data.deployments || [];
     if (!deployments.length) return { content: [{ type: "text", text: "No deployments found." }] };
-    const lines = deployments.map((d: any) =>
+    const lines = deployments.map(d =>
       `- ID: ${d.deploymentId}\n  Config: ${d.deploymentConfig?.description || "N/A"}\n  Version: ${d.deploymentConfig?.versionNumber || "HEAD"}\n  Updated: ${d.updateTime}`
     );
     return { content: [{ type: "text", text: `Deployments (${deployments.length}):\n\n${lines.join("\n\n")}` }] };
@@ -122,7 +127,7 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     const config: Record<string, unknown> = { manifestFileName: manifest_file_name };
     if (version_number) config.versionNumber = version_number;
     if (description) config.description = description;
-    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken, "POST", { deploymentConfig: config }) as any;
+    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments`, accessToken, "POST", { deploymentConfig: config }) as ScriptDeployment;
     return { content: [{ type: "text", text: `Deployment created.\nID: ${result.deploymentId}\nUpdated: ${result.updateTime}` }] };
   }));
 
@@ -135,11 +140,11 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     // deployments.update replaces deploymentConfig wholesale, so unspecified
     // fields must be carried over from the existing deployment or they're wiped.
-    const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken) as any;
+    const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken) as ScriptDeployment;
     const config: Record<string, unknown> = { ...existing.deploymentConfig };
     if (version_number !== undefined) config.versionNumber = version_number;
     if (description !== undefined) config.description = description;
-    await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "PUT", { deploymentConfig: config }) as any;
+    await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "PUT", { deploymentConfig: config });
     return { content: [{ type: "text", text: `Deployment ${deployment_id} updated.` }] };
   }));
 
@@ -160,10 +165,10 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     const params: Record<string, string> = { pageSize: String(page_size) };
     if (script_id) params["userProcessFilter.scriptId"] = script_id;
     const query = new URLSearchParams(params);
-    const data = await googleFetch(`${SCRIPT_BASE}/processes?${query}`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/processes?${query}`, accessToken) as ScriptProcessListResponse;
     const processes = data.processes || [];
     if (!processes.length) return { content: [{ type: "text", text: "No processes found." }] };
-    const lines = processes.map((p: any) =>
+    const lines = processes.map(p =>
       `- Function: ${p.functionName || "N/A"}\n  Status: ${p.processStatus}\n  Type: ${p.processType}\n  Start: ${p.startTime}\n  Duration: ${p.duration || "N/A"}`
     );
     return { content: [{ type: "text", text: `Processes (${processes.length}):\n\n${lines.join("\n\n")}` }] };
@@ -180,7 +185,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = {};
     if (description) body.description = description;
-    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions`, accessToken, "POST", body) as any;
+    const result = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions`, accessToken, "POST", body) as ScriptVersion;
     return { content: [{ type: "text", text: `Version created.\nNumber: ${result.versionNumber}\nDescription: ${result.description || "N/A"}\nCreated: ${result.createTime}` }] };
   }));
 
@@ -189,7 +194,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
     version_number: z.number(),
   }, withErrorHandler(async ({ script_id, version_number }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions/${version_number}`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions/${version_number}`, accessToken) as ScriptVersion;
     return { content: [{ type: "text", text: `Version ${data.versionNumber}\nScript ID: ${data.scriptId}\nDescription: ${data.description || "N/A"}\nCreated: ${data.createTime}` }] };
   }));
 
@@ -198,10 +203,10 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
     page_size: z.number().optional().default(20),
   }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, page_size = 20 }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions?pageSize=${page_size}`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions?pageSize=${page_size}`, accessToken) as ScriptVersionListResponse;
     const versions = data.versions || [];
     if (!versions.length) return { content: [{ type: "text", text: "No versions found." }] };
-    const lines = versions.map((v: any) => `v${v.versionNumber}: ${v.description || "(no description)"} | ${v.createTime}`);
+    const lines = versions.map(v => `v${v.versionNumber}: ${v.description || "(no description)"} | ${v.createTime}`);
     return { content: [{ type: "text", text: `Versions (${versions.length}):\n${lines.join("\n")}` }] };
   }));
 
@@ -219,7 +224,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, metrics_granularity = "WEEKLY" }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ metricsGranularity: metrics_granularity });
-    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/metrics?${params}`, accessToken) as any;
+    const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/metrics?${params}`, accessToken) as ScriptMetrics;
     const lines = [`Script Metrics (${metrics_granularity}):`, ""];
     if (data.activeUsers) lines.push(`Active users: ${JSON.stringify(data.activeUsers)}`);
     if (data.failedExecutions) lines.push(`Failed executions: ${JSON.stringify(data.failedExecutions)}`);
@@ -253,10 +258,10 @@ function _registerAppsScriptPhase2(server: McpServer, getCreds: GetCredsFunc) {
       const { accessToken } = await getCreds();
 
       if (action === "list") {
-        const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/triggers`, accessToken) as any;
+        const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/triggers`, accessToken) as ScriptTriggerListResponse;
         const triggers = data.triggers || [];
         if (!triggers.length) return { content: [{ type: "text", text: "No triggers found." }] };
-        const lines = triggers.map((t: any) =>
+        const lines = triggers.map(t =>
           `ID: ${t.triggerId} | Fn: ${t.functionName} | Type: ${t.eventType} | Source: ${t.triggerSource}`
         );
         return { content: [{ type: "text", text: `Triggers (${triggers.length}):\n${lines.join("\n")}` }] };
@@ -299,7 +304,7 @@ function _registerAppsScriptPhase2(server: McpServer, getCreds: GetCredsFunc) {
         const result = await googleFetch(
           `${SCRIPT_BASE}/projects/${script_id}/triggers`,
           accessToken, "POST", triggerBody,
-        ) as any;
+        ) as ScriptTrigger;
         return { content: [{ type: "text", text: [
           `Trigger created.`,
           `ID: ${result.triggerId}`,
@@ -334,9 +339,9 @@ function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFu
         const base = `https://script.googleapis.com/v1/projects/${script_id}/deployments`;
 
         if (action === "list") {
-          const data = await googleFetch(base, accessToken) as any;
+          const data = await googleFetch(base, accessToken) as ScriptDeploymentListResponse;
           const deps = data.deployments || [];
-          const lines = deps.map((d: any) => `ID: ${d.deploymentId} | ${d.deploymentConfig?.description || "(no desc)"} | v${d.deploymentConfig?.versionNumber}`);
+          const lines = deps.map(d => `ID: ${d.deploymentId} | ${d.deploymentConfig?.description || "(no desc)"} | v${d.deploymentConfig?.versionNumber}`);
           return { content: [{ type: "text", text: lines.join("\n") || "No deployments." }] };
         }
 
@@ -344,7 +349,7 @@ function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFu
           const body: any = { deploymentConfig: { scriptId: script_id, access: access_level ?? "MYSELF" } };
           if (version_number) body.deploymentConfig.versionNumber = version_number;
           if (description) body.deploymentConfig.description = description;
-          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          const res = await googleFetch(base, accessToken, "POST", body) as ScriptDeployment;
           return { content: [{ type: "text", text: `Deployment created. ID: ${res.deploymentId}` }] };
         }
 
@@ -352,12 +357,12 @@ function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFu
           if (!deployment_id) throw new Error("deployment_id required");
           // deployments.update replaces deploymentConfig wholesale — merge with
           // the existing config so unspecified fields (e.g. access) aren't wiped.
-          const existing = await googleFetch(`${base}/${deployment_id}`, accessToken) as any;
+          const existing = await googleFetch(`${base}/${deployment_id}`, accessToken) as ScriptDeployment;
           const body: any = { deploymentConfig: { ...existing.deploymentConfig } };
           if (version_number !== undefined) body.deploymentConfig.versionNumber = version_number;
           if (description !== undefined) body.deploymentConfig.description = description;
           if (access_level !== undefined) body.deploymentConfig.access = access_level;
-          const res = await googleFetch(`${base}/${deployment_id}`, accessToken, "PUT", body) as any;
+          const res = await googleFetch(`${base}/${deployment_id}`, accessToken, "PUT", body) as ScriptDeployment;
           return { content: [{ type: "text", text: `Deployment ${res.deploymentId} updated.` }] };
         }
   
@@ -387,22 +392,22 @@ function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFu
         const base = `https://script.googleapis.com/v1/projects/${script_id}/versions`;
   
         if (action === "list") {
-          const data = await googleFetch(base, accessToken) as any;
+          const data = await googleFetch(base, accessToken) as ScriptVersionListResponse;
           const vers = data.versions || [];
-          const lines = vers.map((v: any) => `v${v.versionNumber} | ${v.createTime} | ${v.description || ""}`);
+          const lines = vers.map(v => `v${v.versionNumber} | ${v.createTime} | ${v.description || ""}`);
           return { content: [{ type: "text", text: lines.join("\n") || "No versions." }] };
         }
-  
+
         if (action === "create") {
           const body: any = {};
           if (description) body.description = description;
-          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          const res = await googleFetch(base, accessToken, "POST", body) as ScriptVersion;
           return { content: [{ type: "text", text: `Version v${res.versionNumber} created.` }] };
         }
-  
+
         if (action === "get") {
           if (!version_number) throw new Error("version_number required");
-          const v = await googleFetch(`${base}/${version_number}`, accessToken) as any;
+          const v = await googleFetch(`${base}/${version_number}`, accessToken) as ScriptVersion;
           return { content: [{ type: "text", text: `v${v.versionNumber} | ${v.createTime} | ${v.description || ""}` }] };
         }
   

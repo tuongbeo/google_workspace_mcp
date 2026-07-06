@@ -7,6 +7,10 @@ import { z } from "zod";
 import { googleFetch, driveRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  DriveFileSearchResult, DriveFileListResponse, DrivePermission, DrivePermissionListResponse,
+  DriveRevision, DriveRevisionListResponse,
+} from "./google-api-types";
 
 // ── Markdown → HTML converter ──────────────────────────────────────────────
 // Design tokens from Anthropic DOCX skill:
@@ -91,8 +95,8 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     file_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ file_id }) => {
     const { accessToken } = await getCreds();
-    const data = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType,size,modifiedTime,createdTime,webViewLink,description,owners,parents`) as any;
-    const lines = [`File: ${data.name}`, `ID: ${data.id}`, `Type: ${data.mimeType}`, `Size: ${data.size ? Math.round(data.size / 1024) + " KB" : "N/A"}`, `Created: ${data.createdTime}`, `Modified: ${data.modifiedTime}`, `Link: ${data.webViewLink || "N/A"}`, `Owner: ${data.owners?.map((o: any) => o.emailAddress).join(", ") || "N/A"}`];
+    const data = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType,size,modifiedTime,createdTime,webViewLink,description,owners,parents`) as DriveFileSearchResult;
+    const lines = [`File: ${data.name}`, `ID: ${data.id}`, `Type: ${data.mimeType}`, `Size: ${data.size ? Math.round(Number(data.size) / 1024) + " KB" : "N/A"}`, `Created: ${data.createdTime}`, `Modified: ${data.modifiedTime}`, `Link: ${data.webViewLink || "N/A"}`, `Owner: ${data.owners?.map(o => o.emailAddress).join(", ") || "N/A"}`];
     if (data.description) lines.push(`Description: ${data.description}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
@@ -103,8 +107,8 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     export_format: z.enum(["text", "html", "markdown", "csv"]).optional().default("text"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ file_id, export_format = "text" }) => {
     const { accessToken } = await getCreds();
-    const meta = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType`) as any;
-    const mimeType = meta.mimeType;
+    const meta = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType`) as DriveFileSearchResult;
+    const mimeType = meta.mimeType || "";
     let exportMime = "text/plain";
     if (export_format === "html") exportMime = "text/html";
     else if (export_format === "markdown") exportMime = "text/markdown";
@@ -144,7 +148,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     form.append("file", new Blob([fileContent], { type: mime_type }));
     const resp = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink", { method: "POST", headers: { Authorization: `Bearer ${accessToken}` }, body: form });
     if (!resp.ok) throw new Error(`Create failed: ${await resp.text()}`);
-    const result = await resp.json() as any;
+    const result = await resp.json() as DriveFileSearchResult;
     return { content: [{ type: "text", text: `File created: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
   }));
 
@@ -163,7 +167,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     const params = new URLSearchParams({ fields: "id,name" });
     if (add_parent) params.set("addParents", add_parent);
     if (remove_parent) params.set("removeParents", remove_parent);
-    const result = await driveRequest(accessToken, `/files/${file_id}?${params}`, "PATCH", body) as any;
+    const result = await driveRequest(accessToken, `/files/${file_id}?${params}`, "PATCH", body) as DriveFileSearchResult;
     return { content: [{ type: "text", text: `File updated: "${result.name}" (ID: ${result.id})` }] };
   }));
 
@@ -174,7 +178,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const metadata: Record<string, unknown> = { name: title, mimeType: "application/vnd.google-apps.folder" };
     if (parent_folder_id) metadata.parents = [parent_folder_id];
-    const result = await driveRequest(accessToken, "/files?fields=id,name,webViewLink", "POST", metadata) as any;
+    const result = await driveRequest(accessToken, "/files?fields=id,name,webViewLink", "POST", metadata) as DriveFileSearchResult;
     return { content: [{ type: "text", text: `Folder created: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
   }));
 
@@ -186,7 +190,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { name: new_title };
     if (destination_folder_id) body.parents = [destination_folder_id];
-    const result = await driveRequest(accessToken, `/files/${file_id}/copy?fields=id,name,webViewLink`, "POST", body) as any;
+    const result = await driveRequest(accessToken, `/files/${file_id}/copy?fields=id,name,webViewLink`, "POST", body) as DriveFileSearchResult;
     return { content: [{ type: "text", text: `Copied: "${result.name}"\nID: ${result.id}\nLink: ${result.webViewLink}` }] };
   }));
 
@@ -196,7 +200,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
   }, withErrorHandler(async ({ file_id, permission = "reader" }) => {
     const { accessToken } = await getCreds();
     await driveRequest(accessToken, `/files/${file_id}/permissions`, "POST", { role: permission, type: "anyone" });
-    const file = await driveRequest(accessToken, `/files/${file_id}?fields=webViewLink`) as any;
+    const file = await driveRequest(accessToken, `/files/${file_id}?fields=webViewLink`) as DriveFileSearchResult;
     return { content: [{ type: "text", text: `Shareable link (${permission}):\n${file.webViewLink}` }] };
   }));
 
@@ -212,7 +216,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     const body: Record<string, unknown> = { role, type, emailAddress: email };
     const params = new URLSearchParams({ sendNotificationEmail: String(send_notification) });
     if (email_message) params.set("emailMessage", email_message);
-    const result = await driveRequest(accessToken, `/files/${file_id}/permissions?${params}`, "POST", body) as any;
+    const result = await driveRequest(accessToken, `/files/${file_id}/permissions?${params}`, "POST", body) as DrivePermission;
     return { content: [{ type: "text", text: `Shared with ${email} as ${role}. Permission ID: ${result.id}` }] };
   }));
 
@@ -220,8 +224,8 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
     file_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ file_id }) => {
     const { accessToken } = await getCreds();
-    const data = await driveRequest(accessToken, `/files/${file_id}/permissions?fields=permissions(id,role,type,emailAddress,displayName)`) as any;
-    const perms = (data.permissions || []).map((p: any) => `- ${p.type}: ${p.emailAddress || p.displayName || "anyone"} | Role: ${p.role} | ID: ${p.id}`);
+    const data = await driveRequest(accessToken, `/files/${file_id}/permissions?fields=permissions(id,role,type,emailAddress,displayName)`) as DrivePermissionListResponse;
+    const perms = (data.permissions || []).map(p => `- ${p.type}: ${p.emailAddress || p.displayName || "anyone"} | Role: ${p.role} | ID: ${p.id}`);
     return { content: [{ type: "text", text: `Permissions for ${file_id}:\n${perms.join("\n")}` }] };
   }));
 
@@ -260,7 +264,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
       `/files/${file_id}/permissions?${params}`,
       "POST",
       { role: "owner", type: "user", emailAddress: new_owner_email }
-    ) as any;
+    ) as DrivePermission;
     return { content: [{ type: "text", text: `Ownership transferred to ${new_owner_email}.\nPermission ID: ${result.id}\nRole: ${result.role}` }] };
   }));
 
@@ -289,7 +293,7 @@ function _registerDriveExtra(server: McpServer, getCreds: GetCredsFunc) {
     export_mime_type: z.string().optional().describe("For Google native files: export MIME type, e.g. 'application/pdf', 'text/plain', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ file_id, export_mime_type }) => {
     const { accessToken } = await getCreds();
-    const meta = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType,size,webContentLink,webViewLink`) as any;
+    const meta = await driveRequest(accessToken, `/files/${file_id}?fields=id,name,mimeType,size,webContentLink,webViewLink`) as DriveFileSearchResult;
     const lines = [`File: ${meta.name}`, `Type: ${meta.mimeType}`];
     if (meta.webContentLink) lines.push(`Direct download: ${meta.webContentLink}`);
     if (meta.webViewLink) lines.push(`View link: ${meta.webViewLink}`);
@@ -306,10 +310,10 @@ function _registerDriveExtra(server: McpServer, getCreds: GetCredsFunc) {
     file_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ file_id }) => {
     const { accessToken } = await getCreds();
-    const data = await driveRequest(accessToken, `/files/${file_id}/permissions?fields=permissions(id,role,type,emailAddress,displayName)`) as any;
+    const data = await driveRequest(accessToken, `/files/${file_id}/permissions?fields=permissions(id,role,type,emailAddress,displayName)`) as DrivePermissionListResponse;
     const perms = data.permissions || [];
-    const publicPerm = perms.find((p: any) => p.type === "anyone");
-    const domainPerm = perms.find((p: any) => p.type === "domain");
+    const publicPerm = perms.find(p => p.type === "anyone");
+    const domainPerm = perms.find(p => p.type === "domain");
     const lines = [`File: ${file_id}`, ""];
     if (publicPerm) {
       lines.push(`✅ PUBLIC ACCESS: Anyone can ${publicPerm.role}`);
@@ -320,8 +324,8 @@ function _registerDriveExtra(server: McpServer, getCreds: GetCredsFunc) {
       lines.push("🔒 PRIVATE: No public or domain access");
     }
     lines.push(`\nTotal permissions: ${perms.length}`);
-    const named = perms.filter((p: any) => p.type === "user" || p.type === "group");
-    if (named.length) lines.push(`Named users/groups: ${named.map((p: any) => `${p.emailAddress || p.displayName} (${p.role})`).join(", ")}`);
+    const named = perms.filter(p => p.type === "user" || p.type === "group");
+    if (named.length) lines.push(`Named users/groups: ${named.map(p => `${p.emailAddress || p.displayName} (${p.role})`).join(", ")}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
 }
@@ -346,13 +350,13 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
         fields: "revisions(id,modifiedTime,lastModifyingUser,size,keepForever,published,mimeType),nextPageToken",
         pageSize: String(Math.min(page_size, 200)),
       });
-      const data = await driveRequest(accessToken, `/files/${file_id}/revisions?${params}`) as any;
+      const data = await driveRequest(accessToken, `/files/${file_id}/revisions?${params}`) as DriveRevisionListResponse;
       const revisions = data.revisions || [];
       if (!revisions.length) {
         return { content: [{ type: "text", text: "No revisions found. Drive may not track revisions for this file type." }] };
       }
       const lines = [`Revisions for file ${file_id} (${revisions.length}):`, ""];
-      revisions.forEach((r: any, i: number) => {
+      revisions.forEach((r, i) => {
         const modifier = r.lastModifyingUser?.emailAddress || r.lastModifyingUser?.displayName || "unknown";
         const size = r.size ? `${Math.round(Number(r.size) / 1024)} KB` : "N/A";
         const flags = [
@@ -384,7 +388,7 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
       const r = await driveRequest(
         accessToken,
         `/files/${file_id}/revisions/${revision_id}?fields=id,modifiedTime,lastModifyingUser,size,keepForever,published,publishAuto,mimeType,exportLinks`
-      ) as any;
+      ) as DriveRevision;
       const lines = [
         `Revision ID: ${r.id}`,
         `Modified: ${r.modifiedTime}`,
@@ -435,7 +439,7 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
         `/files/${file_id}/revisions/${revision_id}`,
         "PATCH",
         body
-      ) as any;
+      ) as DriveRevision;
 
       const changed = Object.keys(body).map(k => `${k}=${JSON.stringify(body[k])}`).join(", ");
       return {
@@ -497,7 +501,7 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
       const r = await driveRequest(
         accessToken,
         `/files/${file_id}/revisions/${revision_id}?fields=id,mimeType,exportLinks,size`
-      ) as any;
+      ) as DriveRevision;
 
       const lines = [`Revision ${revision_id} of file ${file_id}:`];
 
@@ -543,7 +547,7 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
       const data = await driveRequest(
         accessToken,
         `/files/${file_id}/revisions?fields=revisions(id,modifiedTime,keepForever)&pageSize=5`
-      ) as any;
+      ) as DriveRevisionListResponse;
       const revisions = data.revisions || [];
       if (!revisions.length) {
         return { content: [{ type: "text", text: "No revisions found for this file." }] };
@@ -563,7 +567,7 @@ function _registerDriveRevisions(server: McpServer, getCreds: GetCredsFunc) {
         `/files/${file_id}/revisions/${latest.id}`,
         "PATCH",
         { keepForever: true }
-      ) as any;
+      ) as DriveRevision;
       return {
         content: [{
           type: "text",
@@ -597,28 +601,28 @@ function _registerDriveConsolidated(server: McpServer, getCreds: GetCredsFunc): 
         const base = `https://www.googleapis.com/drive/v3/files/${file_id}/revisions`;
   
         if (action === "list") {
-          const data = await googleFetch(`${base}?fields=revisions(id,modifiedTime,lastModifyingUser,size,keepForever)`, accessToken) as any;
+          const data = await googleFetch(`${base}?fields=revisions(id,modifiedTime,lastModifyingUser,size,keepForever)`, accessToken) as DriveRevisionListResponse;
           const revs = data.revisions || [];
-          const lines = revs.map((r: any) => `Rev ${r.id} | ${r.modifiedTime} | By: ${r.lastModifyingUser?.displayName} | Pinned: ${r.keepForever}`);
+          const lines = revs.map(r => `Rev ${r.id} | ${r.modifiedTime} | By: ${r.lastModifyingUser?.displayName} | Pinned: ${r.keepForever}`);
           return { content: [{ type: "text", text: lines.join("\n") || "No revisions." }] };
         }
-  
+
         if (action === "get") {
           if (!revision_id) throw new Error("revision_id required");
-          const r = await googleFetch(`${base}/${revision_id}`, accessToken) as any;
+          const r = await googleFetch(`${base}/${revision_id}`, accessToken) as DriveRevision;
           return { content: [{ type: "text", text: `Rev ${r.id} | ${r.modifiedTime} | Pinned: ${r.keepForever}` }] };
         }
-  
+
         if (action === "download") {
           if (!revision_id) throw new Error("revision_id required");
-          const r = await googleFetch(`${base}/${revision_id}?fields=exportLinks,webContentLink`, accessToken) as any;
+          const r = await googleFetch(`${base}/${revision_id}?fields=exportLinks,webContentLink`, accessToken) as DriveRevision;
           const url = r.webContentLink || Object.values(r.exportLinks || {})[0];
           return { content: [{ type: "text", text: `Download URL: ${url}` }] };
         }
-  
+
         if (action === "pin" || action === "update") {
           if (!revision_id) throw new Error("revision_id required");
-          const res = await googleFetch(`${base}/${revision_id}`, accessToken, "PATCH", { keepForever: keep_forever }) as any;
+          const res = await googleFetch(`${base}/${revision_id}`, accessToken, "PATCH", { keepForever: keep_forever }) as DriveRevision;
           return { content: [{ type: "text", text: `Revision ${res.id} updated. keepForever=${res.keepForever}` }] };
         }
   
@@ -649,10 +653,10 @@ function _registerDriveSearch(server: McpServer, getCreds: GetCredsFunc): void {
     if (folder_id) q = (q ? `(${q}) and ` : "") + `'${folder_id}' in parents`;
     if (q) params.set("q", q);
     if (page_token) params.set("pageToken", page_token);
-    const data = await driveRequest(accessToken, `/files?${params}`) as any;
+    const data = await driveRequest(accessToken, `/files?${params}`) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: "No files found." }] };
-    const lines = files.map((f: any) => `📄 ${f.name} (${f.mimeType.split(".").pop()})\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink || "N/A"}`);
+    const lines = files.map(f => `📄 ${f.name} (${f.mimeType?.split(".").pop()})\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink || "N/A"}`);
     if (data.nextPageToken) lines.push(`\nNext page: ${data.nextPageToken}`);
     return { content: [{ type: "text", text: lines.join("\n\n") }] };
   }));
@@ -668,10 +672,10 @@ function _registerDriveSearch(server: McpServer, getCreds: GetCredsFunc): void {
     if (file_type !== "any") q += ` and mimeType='${mimeMap[file_type]}'`;
     q += " and trashed=false";
     const params = new URLSearchParams({ q, fields: "files(id,name,mimeType,modifiedTime,webViewLink)", pageSize: String(max_results) });
-    const data = await driveRequest(accessToken, `/files?${params}`) as any;
+    const data = await driveRequest(accessToken, `/files?${params}`) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: `No files for: "${query}"` }] };
-    const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Link: ${f.webViewLink || "N/A"}`);
+    const lines = files.map(f => `📄 ${f.name}\n   ID: ${f.id}\n   Link: ${f.webViewLink || "N/A"}`);
     return { content: [{ type: "text", text: `Found ${files.length} files:\n\n${lines.join("\n\n")}` }] };
   }));
 }

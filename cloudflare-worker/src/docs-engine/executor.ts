@@ -5,6 +5,7 @@
 
 import { docsRequest, googleFetch } from "../google";
 import type { ExecutionPlan, RichElement } from "./types";
+import type { DocsDocument, DocsStructuralElement, DocsTab, DocsBatchUpdateResponse } from "../tools/google-api-types";
 
 // ── Pass 1: Text + structure ──────────────────────────────────────────────────
 
@@ -33,9 +34,9 @@ export async function executePass2(
   // All rich elements (images, mentions, footnotes, TOC, tables) use placeholders
   // Re-read document to find all placeholders at once
   const path = tabId ? "?includeTabsContent=true" : "";
-  const doc = await docsRequest(accessToken, documentId, path) as any;
+  const doc = await docsRequest(accessToken, documentId, path) as DocsDocument;
 
-  let bodyContent: any[];
+  let bodyContent: DocsStructuralElement[];
   if (tabId && doc.tabs) {
     const tab = findTab(doc.tabs, tabId);
     bodyContent = tab?.documentTab?.body?.content ?? [];
@@ -176,8 +177,8 @@ async function insertRichElement(
 
         case "footnote": {
       const body: Record<string, unknown> = { requests: [deleteReq, { createFootnote: { location: loc } }] };
-      const result = await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body) as any;
-      const fnId = result.replies?.find((r: any) => r.createFootnote)?.createFootnote?.footnoteId;
+      const result = await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body) as DocsBatchUpdateResponse;
+      const fnId = result.replies?.find(r => r.createFootnote)?.createFootnote?.footnoteId;
       if (fnId && el.footnoteContent) {
         await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: { segmentId: fnId, index: 0 }, text: el.footnoteContent } }],
@@ -248,7 +249,7 @@ export async function applyHeaderFooter(
   headerText?: string,
   footerText?: string
 ): Promise<void> {
-  const doc = await docsRequest(accessToken, documentId) as any;
+  const doc = await docsRequest(accessToken, documentId) as DocsDocument;
   const requests: object[] = [];
 
   async function upsertSegment(type: "header" | "footer", text: string) {
@@ -259,8 +260,9 @@ export async function applyHeaderFooter(
       const createKey = type === "header" ? "createHeader" : "createFooter";
       const result = await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
         requests: [{ [createKey]: { type: "DEFAULT" } }],
-      }) as any;
-      const newId = result.replies?.[0]?.[createKey]?.[type === "header" ? "headerId" : "footerId"];
+      }) as DocsBatchUpdateResponse;
+      const reply = result.replies?.[0];
+      const newId = type === "header" ? reply?.createHeader?.headerId : reply?.createFooter?.footerId;
       if (newId) {
         await docsRequest(accessToken, documentId, ":batchUpdate", "POST", {
           requests: [{ insertText: { location: { segmentId: newId, index: 0 }, text } }],
@@ -268,7 +270,7 @@ export async function applyHeaderFooter(
       }
     } else {
       // Clear and set
-      const segDoc = await docsRequest(accessToken, `${documentId}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as any;
+      const segDoc = await docsRequest(accessToken, `${documentId}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as DocsDocument;
       const seg = type === "header" ? segDoc.headers?.[segId] : segDoc.footers?.[segId];
       const endIdx = seg?.content?.slice(-1)[0]?.endIndex ?? 1;
       const reqs: object[] = [];
@@ -284,7 +286,7 @@ export async function applyHeaderFooter(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function findTab(tabList: any[], tabId: string): any | null {
+function findTab(tabList: DocsTab[], tabId: string): DocsTab | null {
   for (const tab of tabList ?? []) {
     if (tab.tabProperties?.tabId === tabId) return tab;
     const found = findTab(tab.childTabs ?? [], tabId);
@@ -302,11 +304,11 @@ interface DocTextResult {
   docIndices: number[]; // parallel array: docIndices[i] = Google Doc index for text[i]
 }
 
-function buildDocText(bodyContent: any[]): DocTextResult {
+function buildDocText(bodyContent: DocsStructuralElement[]): DocTextResult {
   const chars: string[] = [];
   const docIndices: number[] = [];
 
-  function walkContent(content: any[]) {
+  function walkContent(content: DocsStructuralElement[]) {
     for (const elem of content ?? []) {
       if (elem.paragraph) {
         for (const pe of elem.paragraph.elements ?? []) {
@@ -348,9 +350,9 @@ async function fillTableCells(
   tabId?: string
 ): Promise<void> {
   const path = tabId ? "?includeTabsContent=true" : "";
-  const doc = await docsRequest(accessToken, documentId, path) as any;
+  const doc = await docsRequest(accessToken, documentId, path) as DocsDocument;
   const bodyContent = tabId
-    ? findTab(doc.tabs, tabId)?.documentTab?.body?.content
+    ? findTab(doc.tabs ?? [], tabId)?.documentTab?.body?.content
     : doc.body?.content;
 
   const { headers, rows } = tableData;
@@ -358,10 +360,10 @@ async function fillTableCells(
   const nCols = headers.length;
 
   // Find the most recently inserted table matching dimensions (findLast not in older V8)
-  const tables = (bodyContent ?? []).filter((e: any) => e.table);
-  let tableElem: any = null;
+  const tables = (bodyContent ?? []).filter(e => e.table);
+  let tableElem: DocsStructuralElement | null = null;
   for (let ti = tables.length - 1; ti >= 0; ti--) {
-    if (tables[ti].table.rows === nRows && tables[ti].table.columns === nCols) {
+    if (tables[ti].table?.rows === nRows && tables[ti].table?.columns === nCols) {
       tableElem = tables[ti];
       break;
     }
@@ -372,7 +374,7 @@ async function fillTableCells(
   const insertReqs: object[] = [];
   for (let r = 0; r < allData.length; r++) {
     for (let c = 0; c < nCols; c++) {
-      const cell = tableElem.table.tableRows[r]?.tableCells[c];
+      const cell = tableElem.table?.tableRows?.[r]?.tableCells?.[c];
       const cellIndex = cell?.content?.[0]?.startIndex;
       const cellText = allData[r][c] ?? "";
       if (cellIndex !== undefined && cellText) {
@@ -389,11 +391,11 @@ async function fillTableCells(
   await docsRequest(accessToken, documentId, ":batchUpdate", "POST", body);
 
   // Style header row: background + bold white text per cell
-  const headerRow = tableElem.table.tableRows[0];
+  const headerRow = tableElem.table?.tableRows?.[0];
   if (headerRow) {
     const styleReqs: object[] = [];
     for (let ci = 0; ci < nCols; ci++) {
-      const cell = headerRow.tableCells[ci];
+      const cell = headerRow.tableCells?.[ci];
       if (!cell) continue;
       const cellStart = cell.content?.[0]?.startIndex;
       const lastContent = cell.content?.slice(-1)[0];

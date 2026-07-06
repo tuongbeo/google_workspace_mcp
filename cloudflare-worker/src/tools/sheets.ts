@@ -10,6 +10,10 @@ import { getTheme, hexToSheetsRgb } from "../styles";
 import { executeWriteSheet } from "../sheets-engine/executor";
 import { WriteSheetInput } from "../sheets-engine/types";
 import type { GetCredsFunc } from "../types";
+import type {
+  DriveFileListResponse, Spreadsheet, SheetValuesResponse, SheetValuesUpdateResponse,
+  SheetValuesAppendResponse, SheetsBatchUpdateResponse, SpreadsheetWithGridData,
+} from "./google-api-types";
 
 function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
 
@@ -17,9 +21,9 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     spreadsheet_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ spreadsheet_id }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, "?fields=spreadsheetId,properties,sheets.properties") as any;
-    const sheets = (data.sheets || []).map((s: any) =>
-      `  - ${s.properties.title} (ID: ${s.properties.sheetId}, ${s.properties.gridProperties?.rowCount}r × ${s.properties.gridProperties?.columnCount}c)`
+    const data = await sheetsRequest(accessToken, spreadsheet_id, "?fields=spreadsheetId,properties,sheets.properties") as Spreadsheet;
+    const sheets = (data.sheets || []).map(s =>
+      `  - ${s.properties?.title} (ID: ${s.properties?.sheetId}, ${s.properties?.gridProperties?.rowCount}r × ${s.properties?.gridProperties?.columnCount}c)`
     );
     return { content: [{ type: "text", text: `Spreadsheet: ${data.properties?.title}\nID: ${data.spreadsheetId}\n\nSheets:\n${sheets.join("\n")}` }] };
   }));
@@ -32,10 +36,10 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     let q = "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false";
     if (query) q += ` and name contains '${query}'`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: "No spreadsheets found." }] };
-    const lines = files.map((f: any) => `📊 ${f.name}\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
+    const lines = files.map(f => `📊 ${f.name}\n   ID: ${f.id} | Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
     return { content: [{ type: "text", text: `Found ${files.length} spreadsheets:\n\n${lines.join("\n\n")}` }] };
   }));
 
@@ -47,21 +51,21 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
 
     if (!include_notes) {
-      const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}`) as any;
+      const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}`) as SheetValuesResponse;
       const values = data.values || [];
       if (!values.length) return { content: [{ type: "text", text: "No data found." }] };
-      const lines = values.map((row: any[]) => row.join("\t"));
+      const lines = values.map(row => row.join("\t"));
       return { content: [{ type: "text", text: `Data in ${range} (${values.length} rows):\n\n${lines.join("\n")}` }] };
     }
 
     // Include notes: use spreadsheets.get with includeGridData
     const params = new URLSearchParams({ ranges: range, includeGridData: "true", fields: "sheets.data.rowData.values(formattedValue,note)" });
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `?${params}`) as any;
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `?${params}`) as SpreadsheetWithGridData;
     const rowData = data.sheets?.[0]?.data?.[0]?.rowData || [];
     if (!rowData.length) return { content: [{ type: "text", text: "No data found." }] };
-    const lines = rowData.map((row: any) => {
+    const lines = rowData.map(row => {
       const cells = row.values || [];
-      return cells.map((cell: any) => {
+      return cells.map(cell => {
         const val = cell.formattedValue || "";
         const note = cell.note ? ` [note: ${cell.note}]` : "";
         return `${val}${note}`;
@@ -76,7 +80,7 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     values: z.array(z.array(z.string())).describe("2D array of values"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ spreadsheet_id, range, values }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values }) as any;
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values }) as SheetValuesUpdateResponse;
     return { content: [{ type: "text", text: `Updated ${data.updatedRows} rows, ${data.updatedColumns} cols, ${data.updatedCells} cells.` }] };
   }));
 
@@ -86,7 +90,7 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     values: z.array(z.array(z.string())),
   }, { readOnlyHint: false }, withErrorHandler(async ({ spreadsheet_id, range, values }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { range, majorDimension: "ROWS", values }) as any;
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { range, majorDimension: "ROWS", values }) as SheetValuesAppendResponse;
     return { content: [{ type: "text", text: `Appended ${data.updates?.updatedRows || "?"} rows.` }] };
   }));
 
@@ -100,8 +104,8 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { properties: { title } };
     if (sheet_names?.length) body.sheets = sheet_names.map(name => ({ properties: { title: name } }));
-    const result = await googleFetch("https://sheets.googleapis.com/v4/spreadsheets", accessToken, "POST", body) as any;
-    return { content: [{ type: "text", text: `Spreadsheet created: "${result.properties.title}"\nID: ${result.spreadsheetId}\nURL: https://docs.google.com/spreadsheets/d/${result.spreadsheetId}/edit` }] };
+    const result = await googleFetch("https://sheets.googleapis.com/v4/spreadsheets", accessToken, "POST", body) as Spreadsheet;
+    return { content: [{ type: "text", text: `Spreadsheet created: "${result.properties?.title}"\nID: ${result.spreadsheetId}\nURL: https://docs.google.com/spreadsheets/d/${result.spreadsheetId}/edit` }] };
   }));
 
   server.tool("create_sheet", "Add a new sheet (tab) to an existing Spreadsheet.", {
@@ -114,7 +118,7 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     if (index !== undefined) props.index = index;
     const result = await sheetsRequest(accessToken, spreadsheet_id, ":batchUpdate", "POST", {
       requests: [{ addSheet: { properties: props } }]
-    }) as any;
+    }) as SheetsBatchUpdateResponse;
     const newSheet = result.replies?.[0]?.addSheet?.properties;
     return { content: [{ type: "text", text: `Sheet "${newSheet?.title}" added (ID: ${newSheet?.sheetId}).` }] };
   }));
@@ -198,13 +202,13 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
       };
       function colLetter(n: number): string { return n < 26 ? String.fromCharCode(65+n) : String.fromCharCode(64+Math.floor(n/26)) + String.fromCharCode(65+(n%26)); }
       const created = await googleFetch("https://sheets.googleapis.com/v4/spreadsheets", accessToken, "POST",
-        { properties: { title }, sheets: sheets.map((s,i) => ({ properties: { title: s.name, index: i } })) }) as any;
-      const spreadsheetId: string = created.spreadsheetId;
-      const createdSheets: any[] = created.sheets;
-      const allReqs: any[] = [];
+        { properties: { title }, sheets: sheets.map((s,i) => ({ properties: { title: s.name, index: i } })) }) as Spreadsheet;
+      const spreadsheetId = created.spreadsheetId!;
+      const createdSheets = created.sheets!;
+      const allReqs: Record<string, unknown>[] = [];
       for (let si = 0; si < sheets.length; si++) {
         const sheet = sheets[si];
-        const sheetId: number = createdSheets[si].properties.sheetId;
+        const sheetId = createdSheets[si].properties!.sheetId!;
         const numCols = sheet.headers.length;
         const numDataRows = sheet.rows.length;
         const totalRows = numDataRows + 1;
@@ -370,7 +374,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
       const { accessToken } = await getCreds();
 
       if (action === "list") {
-        const data = await sheetsRequest(accessToken, spreadsheet_id, "?fields=sheets.charts,sheets.properties") as any;
+        const data = await sheetsRequest(accessToken, spreadsheet_id, "?fields=sheets.charts,sheets.properties") as Spreadsheet;
         const lines: string[] = [];
         for (const sheet of (data.sheets || [])) {
           for (const chart of (sheet.charts || [])) {
@@ -442,7 +446,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
             },
           },
         };
-        const res = await batchUpdate(accessToken, spreadsheet_id, [req]) as any;
+        const res = await batchUpdate(accessToken, spreadsheet_id, [req]) as SheetsBatchUpdateResponse;
         const newChartId = res.replies?.[0]?.addChart?.chart?.chartId;
         return { content: [{ type: "text", text: `Chart created. ID: ${newChartId}` }] };
       }
@@ -704,7 +708,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
             sortOrder: s.order === "ASC" ? "ASCENDING" : "DESCENDING",
           }));
         }
-        const res = await batchUpdate(accessToken, spreadsheet_id, [{ addFilterView: { filter: filterView } }]) as any;
+        const res = await batchUpdate(accessToken, spreadsheet_id, [{ addFilterView: { filter: filterView } }]) as SheetsBatchUpdateResponse;
         const id = res.replies?.[0]?.addFilterView?.filter?.filterViewId;
         return { content: [{ type: "text", text: `Filter view "${title}" created. ID: ${id}` }] };
       } else {
@@ -750,7 +754,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
       if (!warning_only && editors?.length) {
         protectedRange.editors = { users: editors };
       }
-      const res = await batchUpdate(accessToken, spreadsheet_id, [{ addProtectedRange: { protectedRange } }]) as any;
+      const res = await batchUpdate(accessToken, spreadsheet_id, [{ addProtectedRange: { protectedRange } }]) as SheetsBatchUpdateResponse;
       const pid = res.replies?.[0]?.addProtectedRange?.protectedRange?.protectedRangeId;
       return { content: [{ type: "text", text: `Protected range added. ID: ${pid}` }] };
     }),
@@ -768,7 +772,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
     { readOnlyHint: false },
     withErrorHandler(async ({ spreadsheet_id, requests }) => {
       const { accessToken } = await getCreds();
-      const result = await batchUpdate(accessToken, spreadsheet_id, requests) as any;
+      const result = await batchUpdate(accessToken, spreadsheet_id, requests) as SheetsBatchUpdateResponse;
       const replyCount = result.replies?.length ?? 0;
       return { content: [{ type: "text", text: `batchUpdate completed. ${requests.length} request(s), ${replyCount} reply/replies.\nSpreadsheetId: ${result.spreadsheetId}` }] };
     }),
@@ -924,8 +928,8 @@ function _registerWriteGoogleSheet(server: McpServer, getCreds: GetCredsFunc) {
         name: params.name,
         spreadsheet_id: params.spreadsheet_id,
         sheet_name: params.sheet_name,
-        sheets: params.sheets as any,
-        data: params.data as any,
+        sheets: params.sheets,
+        data: params.data,
         csv: params.csv,
         markdown_table: params.markdown_table,
         column_groups: params.column_groups,
@@ -934,18 +938,18 @@ function _registerWriteGoogleSheet(server: McpServer, getCreds: GetCredsFunc) {
         columns: params.columns
           ? Object.fromEntries(Object.entries(params.columns).map(([k, v]) => [parseInt(k), v]))
           : undefined,
-        theme: params.theme as any,
-        font_pair: params.font_pair as any,
+        theme: params.theme,
+        font_pair: params.font_pair,
         alternating_rows: params.alternating_rows,
         freeze_rows: params.freeze_rows,
         freeze_cols: params.freeze_cols,
         auto_resize_columns: params.auto_resize_columns,
         summary_row: params.summary_row,
         conditional_highlight: params.conditional_highlight,
-        conditional_rules: params.conditional_rules as any,
-        chart: params.chart as any,
-        overlay_images: params.overlay_images as any,
-        position: params.position as any,
+        conditional_rules: params.conditional_rules,
+        chart: params.chart,
+        overlay_images: params.overlay_images,
+        position: params.position,
       };
 
       const { spreadsheetId, url, summary } = await executeWriteSheet(accessToken, input);

@@ -10,17 +10,21 @@ import { parseMarkdown } from "../docs-engine/parser";
 import { buildExecutionPlan } from "../docs-engine/builder";
 import { executePass1, executePass2, executePass3, applyHeaderFooter } from "../docs-engine/executor";
 import type { GetCredsFunc } from "../types";
+import type {
+  DocsDocument, DocsStructuralElement, DocsTab, DocsBatchUpdateResponse,
+  DriveFileListResponse, DriveFileSearchResult, DriveCommentListResponse, DriveComment,
+} from "./google-api-types";
 
 // ── Module-level helpers (pure functions, fully testable) ─────────────────────
 
 /** Extract readable text lines from a Doc body content array. */
-function extractDocText(bodyContent: any[]): string[] {
+function extractDocText(bodyContent: DocsStructuralElement[] | undefined): string[] {
   const lines: string[] = [];
   for (const elem of bodyContent || []) {
     if (!elem.paragraph) continue;
     const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
     const text = (elem.paragraph.elements || [])
-      .map((e: any) => {
+      .map(e => {
         if (e.textRun) return e.textRun.content || "";
         if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
         return "";
@@ -37,7 +41,7 @@ function extractDocText(bodyContent: any[]): string[] {
 }
 
 /** Walk a tab tree and collect text content into a lines array. */
-function walkDocTabs(tabList: any[], lines: string[]): void {
+function walkDocTabs(tabList: DocsTab[], lines: string[]): void {
   for (const tab of tabList) {
     const p = tab.tabProperties;
     lines.push(`\n## [Tab] ${p?.iconEmoji ? p.iconEmoji + " " : ""}${p?.title || "(Untitled)"} (${p?.tabId})`);
@@ -47,7 +51,7 @@ function walkDocTabs(tabList: any[], lines: string[]): void {
 }
 
 /** Find a tab by ID in a nested tab tree. Returns null if not found. */
-function findDocTab(tabList: any[], id: string): any | null {
+function findDocTab(tabList: DocsTab[], id: string): DocsTab | null {
   for (const tab of tabList) {
     if (tab.tabProperties?.tabId === id) return tab;
     if (tab.childTabs?.length) {
@@ -68,7 +72,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const needsTabs = !!(tab_id || include_all_tabs);
     const path = needsTabs ? "?includeTabsContent=true" : "";
-    const doc = await docsRequest(accessToken, document_id, path) as any;
+    const doc = await docsRequest(accessToken, document_id, path) as DocsDocument;
 
     const lines: string[] = [`# ${doc.title}`, ""];
 
@@ -103,7 +107,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
           replaceText: new_text,
         }
       }]
-    }) as any;
+    }) as DocsBatchUpdateResponse;
     const count = result.replies?.[0]?.replaceAllText?.occurrencesChanged || 0;
     return { content: [{ type: "text", text: `Replaced ${count} occurrence(s) of "${old_text}" → "${new_text}"` }] };
   }));
@@ -116,8 +120,8 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     const requests = replacements.map(r => ({
       replaceAllText: { containsText: { text: r.find, matchCase: r.match_case || false }, replaceText: r.replace }
     }));
-    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests }) as any;
-    const counts = (result.replies || []).map((r: any, i: number) =>
+    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests }) as DocsBatchUpdateResponse;
+    const counts = (result.replies || []).map((r, i) =>
       `"${replacements[i].find}" → "${replacements[i].replace}": ${r.replaceAllText?.occurrencesChanged || 0} occurrence(s)`
     );
     return { content: [{ type: "text", text: `Find and replace results:\n${counts.join("\n")}` }] };
@@ -152,7 +156,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { requests };
     if (tab_id) body.tabsCriteria = { tabIds: [tab_id] };
-    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", body) as any;
+    const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", body) as DocsBatchUpdateResponse;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations executed.` }] };
   }));
 
@@ -160,7 +164,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     document_id: z.string(),
   }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    await docsRequest(accessToken, document_id) as any;
+    await docsRequest(accessToken, document_id);
     const exportUrl = `https://docs.google.com/document/d/${document_id}/export?format=pdf`;
     const resp = await fetch(exportUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
@@ -175,9 +179,9 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
   }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     const path = tab_id ? "?includeTabsContent=true" : "";
-    const doc = await docsRequest(accessToken, document_id, path) as any;
+    const doc = await docsRequest(accessToken, document_id, path) as DocsDocument;
 
-    let bodyContent: any[];
+    let bodyContent: DocsStructuralElement[];
     let contextLabel: string;
 
     if (tab_id) {
@@ -195,7 +199,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     for (const elem of bodyContent.slice(0, 30)) {
       if (elem.paragraph) {
         const style = elem.paragraph.paragraphStyle?.namedStyleType || "NORMAL_TEXT";
-        const text = (elem.paragraph.elements || []).map((e: any) => e.textRun?.content || "").join("").substring(0, 60).replace(/\n/g, "↵");
+        const text = (elem.paragraph.elements || []).map(e => e.textRun?.content || "").join("").substring(0, 60).replace(/\n/g, "↵");
         lines.push(`[${i}] Paragraph [${elem.startIndex}-${elem.endIndex}] ${style}: "${text}"`);
       } else if (elem.table) {
         lines.push(`[${i}] Table [${elem.startIndex}-${elem.endIndex}] ${elem.table.rows}×${elem.table.columns}`);
@@ -213,10 +217,10 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     document_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments?fields=comments(id,author,content,createdTime,resolved,replies)&pageSize=100`, accessToken) as any;
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments?fields=comments(id,author,content,createdTime,resolved,replies)&pageSize=100`, accessToken) as DriveCommentListResponse;
     const comments = data.comments || [];
     if (!comments.length) return { content: [{ type: "text", text: "No comments." }] };
-    const lines = comments.map((c: any) =>
+    const lines = comments.map(c =>
       `ID: ${c.id}\nAuthor: ${c.author?.displayName}\nContent: ${c.content}\nCreated: ${c.createdTime}\nResolved: ${c.resolved || false}\nReplies: ${c.replies?.length || 0}`
     );
     return { content: [{ type: "text", text: lines.join("\n\n---\n\n") }] };
@@ -227,7 +231,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     content: z.string().describe("Comment text"),
   }, withErrorHandler(async ({ document_id, content }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments`, accessToken, "POST", { content }) as any;
+    const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments`, accessToken, "POST", { content }) as DriveComment;
     return { content: [{ type: "text", text: `Comment added. ID: ${result.id}` }] };
   }));
 
@@ -240,7 +244,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { content: reply_content };
     if (resolve) body.action = "resolve";
-    const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments/${comment_id}/replies`, accessToken, "POST", body) as any;
+    const result = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments/${comment_id}/replies`, accessToken, "POST", body) as DriveComment;
     return { content: [{ type: "text", text: `Reply added. Reply ID: ${result.id}${resolve ? " | Comment resolved." : ""}` }] };
   }));
 }
@@ -257,10 +261,10 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     let q = `mimeType='application/vnd.google-apps.document' and name contains '${query.replace(/'/g, "\\'")}' and trashed=false`;
     if (folder_id) q += ` and '${folder_id}' in parents`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: `No docs found for: "${query}"` }] };
-    const lines = files.map((f: any) => `📄 ${f.name}\n   ID: ${f.id}\n   Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
+    const lines = files.map(f => `📄 ${f.name}\n   ID: ${f.id}\n   Modified: ${f.modifiedTime}\n   Link: ${f.webViewLink}`);
     return { content: [{ type: "text", text: `Found ${files.length} docs:\n\n${lines.join("\n\n")}` }] };
   }));
 
@@ -271,10 +275,10 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const q = `mimeType='application/vnd.google-apps.document' and '${folder_id}' in parents and trashed=false`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as DriveFileListResponse;
     const files = data.files || [];
     if (!files.length) return { content: [{ type: "text", text: "No docs in this folder." }] };
-    const lines = files.map((f: any) => `📄 ${f.name} | ID: ${f.id} | ${f.modifiedTime}`);
+    const lines = files.map(f => `📄 ${f.name} | ID: ${f.id} | ${f.modifiedTime}`);
     return { content: [{ type: "text", text: `Docs in folder (${files.length}):\n${lines.join("\n")}` }] };
   }));
 
@@ -285,13 +289,13 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     section_type: z.enum(["DEFAULT", "FIRST_PAGE", "EVEN_PAGE"]).optional().default("DEFAULT"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ document_id, text, target = "header", section_type = "DEFAULT" }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id) as any;
+    const doc = await docsRequest(accessToken, document_id) as DocsDocument;
     const headerId = target === "header" ? doc.documentStyle?.defaultHeaderId : doc.documentStyle?.defaultFooterId;
     if (!headerId) {
       const createReq: Record<string, unknown> = target === "header"
         ? { createHeader: { type: section_type } }
         : { createFooter: { type: section_type } };
-      const createResult = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [createReq] }) as any;
+      const createResult = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", { requests: [createReq] }) as DocsBatchUpdateResponse;
       const newId = target === "header"
         ? createResult.replies?.[0]?.createHeader?.headerId
         : createResult.replies?.[0]?.createFooter?.footerId;
@@ -303,7 +307,7 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
       }
       return { content: [{ type: "text", text: `Could not create ${target}.` }] };
     }
-    const headerDoc = await docsRequest(accessToken, `${document_id}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as any;
+    const headerDoc = await docsRequest(accessToken, `${document_id}?suggestionsViewMode=PREVIEW_WITHOUT_SUGGESTIONS`) as DocsDocument;
     const segment = target === "header" ? headerDoc.headers?.[headerId] : headerDoc.footers?.[headerId];
     const endIndex = segment?.content?.slice(-1)[0]?.endIndex ?? 1;
     const requests: any[] = [];
@@ -324,14 +328,15 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     const cols = data[0].length;
     await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
       requests: [{ insertTable: { rows, columns: cols, location: { index: insertion_index } } }]
-    }) as any;
-    const doc = await docsRequest(accessToken, document_id) as any;
-    const tableElem = doc.body?.content?.find((e: any) => e.table && e.table.rows === rows && e.table.columns === cols);
-    if (!tableElem) return { content: [{ type: "text", text: `Table created (${rows}×${cols}) but could not fill cells — do it manually via batch_update_doc.` }] };
+    });
+    const doc = await docsRequest(accessToken, document_id) as DocsDocument;
+    const tableElem = doc.body?.content?.find(e => e.table && e.table.rows === rows && e.table.columns === cols);
+    if (!tableElem?.table) return { content: [{ type: "text", text: `Table created (${rows}×${cols}) but could not fill cells — do it manually via batch_update_doc.` }] };
+    const table = tableElem.table;
     const insertRequests: any[] = [];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const cell = tableElem.table.tableRows[r]?.tableCells[c];
+        const cell = table.tableRows?.[r]?.tableCells?.[c];
         const cellIndex = cell?.content?.[0]?.startIndex;
         if (cellIndex !== undefined && data[r][c]) {
           insertRequests.push({ insertText: { location: { index: cellIndex }, text: data[r][c] } });
@@ -370,15 +375,15 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     document_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=false") as any;
-    const rootTabs: any[] = doc.tabs || [];
+    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=false") as DocsDocument;
+    const rootTabs: DocsTab[] = doc.tabs || [];
 
     interface TabInfo {
       tab_id: string; title: string; index: number; nested_level: number;
       parent_tab_id: string | null; icon_emoji: string | null; child_count: number;
     }
 
-    function flattenTabs(tabList: any[], level = 0): TabInfo[] {
+    function flattenTabs(tabList: DocsTab[], level = 0): TabInfo[] {
       const result: TabInfo[] = [];
       for (const tab of tabList) {
         const p = tab.tabProperties || {};
@@ -404,7 +409,7 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
     tab_id: z.string().describe("Tab ID to read (get from get_doc_tabs)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
-    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=true") as any;
+    const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=true") as DocsDocument;
 
     const tab = findDocTab(doc.tabs || [], tab_id);
     if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs to list available tabs.` }] };
@@ -416,7 +421,7 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
       if (!elem.paragraph) continue;
       const style = elem.paragraph.paragraphStyle?.namedStyleType || "";
       const text = (elem.paragraph.elements || [])
-        .map((e: any) => {
+        .map(e => {
           if (e.textRun) return e.textRun.content || "";
           if (e.person) return `@${e.person.personProperties?.name || e.person.personProperties?.email || "mention"}`;
           return "";
@@ -454,7 +459,7 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
       let baseIndex = index;
       if (baseIndex === undefined) {
         const path = tab_id ? "?includeTabsContent=true" : "";
-        const doc = await docsRequest(accessToken, document_id, path) as any;
+        const doc = await docsRequest(accessToken, document_id, path) as DocsDocument;
         if (tab_id) {
           const tab = findDocTab(doc.tabs || [], tab_id);
           if (!tab) return { content: [{ type: "text", text: `Tab "${tab_id}" not found. Use get_doc_tabs.` }] };
@@ -576,7 +581,7 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       if (tab_id) range.tabId = tab_id;
       const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ createNamedRange: { name, range } }],
-      }) as any;
+      }) as DocsBatchUpdateResponse;
       const namedRangeId = result.replies?.[0]?.createNamedRange?.namedRangeId;
       return {
         content: [{
@@ -602,9 +607,9 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
     { readOnlyHint: true },
     withErrorHandler(async ({ document_id }) => {
       const { accessToken } = await getCreds();
-      const doc = await docsRequest(accessToken, document_id, "?fields=namedRanges,title") as any;
+      const doc = await docsRequest(accessToken, document_id, "?fields=namedRanges,title") as DocsDocument;
       const namedRanges = doc.namedRanges || {};
-      const entries = Object.entries(namedRanges) as [string, any][];
+      const entries = Object.entries(namedRanges);
       if (!entries.length) {
         return { content: [{ type: "text", text: `Document "${doc.title}" has no named ranges.` }] };
       }
@@ -670,7 +675,7 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       if (tab_id) location.tabId = tab_id;
       const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ createFootnote: { location } }],
-      }) as any;
+      }) as DocsBatchUpdateResponse;
       const footnoteId = result.replies?.[0]?.createFootnote?.footnoteId;
       return {
         content: [{
@@ -727,7 +732,7 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
 
       const result = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
         requests: [{ insertInlineImage: req }],
-      }) as any;
+      }) as DocsBatchUpdateResponse;
       const objectId = result.replies?.[0]?.insertInlineImage?.objectId;
       return {
         content: [{
@@ -789,8 +794,8 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       if (margin_bottom_pt !== undefined) { style.marginBottom = pt(margin_bottom_pt); fields.push("marginBottom"); }
       if (margin_left_pt !== undefined) { style.marginLeft = pt(margin_left_pt); fields.push("marginLeft"); }
       if (margin_right_pt !== undefined) { style.marginRight = pt(margin_right_pt); fields.push("marginRight"); }
-      if (page_width_pt !== undefined) { style.pageSize = { ...(style.pageSize as any || {}), width: pt(page_width_pt) }; fields.push("pageSize"); }
-      if (page_height_pt !== undefined) { style.pageSize = { ...(style.pageSize as any || {}), height: pt(page_height_pt) }; fields.push("pageSize"); }
+      if (page_width_pt !== undefined) { style.pageSize = { ...(style.pageSize as Record<string, unknown> | undefined ?? {}), width: pt(page_width_pt) }; fields.push("pageSize"); }
+      if (page_height_pt !== undefined) { style.pageSize = { ...(style.pageSize as Record<string, unknown> | undefined ?? {}), height: pt(page_height_pt) }; fields.push("pageSize"); }
       if (background_color_hex) {
         style.background = { color: { color: { rgbColor: hexToRgb(background_color_hex) } } };
         fields.push("background");
@@ -835,27 +840,30 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
     withErrorHandler(async ({ document_id }) => {
       const { accessToken } = await getCreds();
       // Fetch with SUGGESTIONS_INLINE to get suggestion data
+      // NOTE: docsRequest's positional args are (accessToken, documentId, path, method) —
+      // the query string must be `path` (3rd arg), not `method` (4th arg, which
+      // must be a valid HTTP verb). This previously passed the query as `method`.
       const doc = await docsRequest(
         accessToken,
         document_id,
-        "GET",
         "?suggestionsViewMode=SUGGESTIONS_INLINE&includeTabsContent=true&fields=title,suggestionsViewMode,body,tabs"
-      ) as any;
+      ) as DocsDocument;
 
       // Collect suggestions from body content
-      const suggestions: Record<string, any> = {};
+      interface Suggestion { id: string; type: "insertion" | "deletion"; changes: { text?: string; author?: unknown }[] }
+      const suggestions: Record<string, Suggestion> = {};
 
-      function scanContent(content: any[]) {
+      function scanContent(content: DocsStructuralElement[] | undefined) {
         for (const elem of content || []) {
           // Check paragraph elements for suggestedInsertions / suggestedDeletions
           for (const pe of elem.paragraph?.elements || []) {
             for (const [sugId, sug] of Object.entries(pe.suggestedInsertions || {})) {
               if (!suggestions[sugId]) suggestions[sugId] = { id: sugId, type: "insertion", changes: [] };
-              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: (sug as any).suggestionsMetadata });
+              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: sug.suggestionsMetadata });
             }
             for (const [sugId, sug] of Object.entries(pe.suggestedDeletions || {})) {
               if (!suggestions[sugId]) suggestions[sugId] = { id: sugId, type: "deletion", changes: [] };
-              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: (sug as any).suggestionsMetadata });
+              suggestions[sugId].changes.push({ text: pe.textRun?.content, author: sug.suggestionsMetadata });
             }
           }
         }
@@ -874,7 +882,7 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       const lines = [`${list.length} suggestion(s) in "${doc.title}":`, ""];
       for (const s of list) {
         lines.push(`ID: ${s.id} | Type: ${s.type}`);
-        const textPreview = s.changes.map((c: any) => c.text?.replace(/\n/g, "\\n")).join("").substring(0, 80);
+        const textPreview = s.changes.map(c => c.text?.replace(/\n/g, "\\n")).join("").substring(0, 80);
         if (textPreview) lines.push(`  Text: "${textPreview}"`);
         lines.push("");
       }
@@ -936,7 +944,7 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       const doc = await googleFetch(
         `https://docs.googleapis.com/v1/documents/${document_id}?fields=title,revisionId,documentStyle,suggestionsViewMode,tabs,body&includeTabsContent=false`,
         accessToken
-      ) as any;
+      ) as DocsDocument;
 
       const style = doc.documentStyle || {};
       const pageSize = style.pageSize || {};
@@ -947,8 +955,8 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       ];
 
       if (pageSize.width || pageSize.height) {
-        const w = pageSize.width?.magnitude;
-        const h = pageSize.height?.magnitude;
+        const w = pageSize.width?.magnitude ?? 0;
+        const h = pageSize.height?.magnitude ?? 0;
         const unit = pageSize.width?.unit || "PT";
         lines.push(`Page size: ${w}×${h} ${unit} (${unit === "PT" ? `${(w/72).toFixed(2)}"×${(h/72).toFixed(2)}"` : ""})`);
       }
@@ -1182,8 +1190,8 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
         const driveFile = await googleFetch(
           "https://www.googleapis.com/drive/v3/files",
           accessToken, "POST", meta
-        ) as any;
-        docId = driveFile.id;
+        ) as DriveFileSearchResult;
+        docId = driveFile.id!;
         docTitle = name;
         docUrl = `https://docs.google.com/document/d/${docId}/edit`;
 
@@ -1198,17 +1206,17 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
           if (new_tab.parent_tab_id) tabProps.parentTabId = new_tab.parent_tab_id;
           const result = await docsRequest(accessToken, docId, ":batchUpdate", "POST", {
             requests: [{ addDocumentTab: { tabProperties: tabProps } }],
-          }) as any;
+          }) as DocsBatchUpdateResponse;
           activeTabId = result.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
         }
 
         // Handle replace mode: clear content
         if (position === "replace") {
           const path = activeTabId ? "?includeTabsContent=true" : "";
-          const doc = await docsRequest(accessToken, docId, path) as any;
-          let bodyContent: any[];
+          const doc = await docsRequest(accessToken, docId, path) as DocsDocument;
+          let bodyContent: DocsStructuralElement[];
           if (activeTabId && doc.tabs) {
-            bodyContent = findTab(doc.tabs, activeTabId)?.documentTab?.body?.content ?? [];
+            bodyContent = findDocTab(doc.tabs, activeTabId)?.documentTab?.body?.content ?? [];
           } else {
             bodyContent = doc.body?.content ?? [];
           }
@@ -1225,8 +1233,8 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
         }
 
         // Get current doc info
-        const docInfo = await docsRequest(accessToken, docId) as any;
-        docTitle = docInfo.title;
+        const docInfo = await docsRequest(accessToken, docId) as DocsDocument;
+        docTitle = docInfo.title!;
         docUrl = `https://docs.google.com/document/d/${docId}/edit`;
 
         // If no explicit theme, detect from existing doc styles (don't override)
@@ -1238,10 +1246,10 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
         // mandatory trailing newline, so new content lands after existing content.
         if (position === "append") {
           const path2 = activeTabId ? "?includeTabsContent=true" : "";
-          const doc2 = await docsRequest(accessToken, docId, path2) as any;
-          let bodyContent2: any[];
+          const doc2 = await docsRequest(accessToken, docId, path2) as DocsDocument;
+          let bodyContent2: DocsStructuralElement[];
           if (activeTabId && doc2.tabs) {
-            bodyContent2 = findTab(doc2.tabs, activeTabId)?.documentTab?.body?.content ?? [];
+            bodyContent2 = findDocTab(doc2.tabs, activeTabId)?.documentTab?.body?.content ?? [];
           } else {
             bodyContent2 = doc2.body?.content ?? [];
           }
@@ -1306,17 +1314,6 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
   );
 }
 
-// ── Helper ────────────────────────────────────────────────────────────────────
-
-function findTab(tabList: any[], tabId: string): any | null {
-  for (const tab of tabList ?? []) {
-    if (tab.tabProperties?.tabId === tabId) return tab;
-    const found = findTab(tab.childTabs ?? [], tabId);
-    if (found) return found;
-  }
-  return null;
-}
-
 
 function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFunc): void {
   // ── manage_doc_tabs ─────────────────────────────────────────────────────────
@@ -1336,35 +1333,36 @@ function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFun
         const { accessToken } = await getCreds();
   
         if (action === "list") {
-          const doc = await docsRequest(accessToken, document_id) as any;
+          const doc = await docsRequest(accessToken, document_id) as DocsDocument;
           const tabs = doc.tabs || [];
           if (!tabs.length) return { content: [{ type: "text", text: "No tabs found (single-tab document)." }] };
-          const lines = tabs.map((t: any) =>
-            `Tab: ${t.documentTab?.properties?.title || "(untitled)"} | ID: ${t.tabProperties?.tabId} | Index: ${t.tabProperties?.index}`
+          const lines = tabs.map(t =>
+            `Tab: ${t.tabProperties?.title || "(untitled)"} | ID: ${t.tabProperties?.tabId} | Index: ${t.tabProperties?.index}`
           );
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
-  
+
         if (action === "get_content") {
           if (!tab_id) throw new Error("tab_id required");
-          const doc = await docsRequest(accessToken, document_id, "GET", `?includeTabsContent=true`) as any;
-          const tab = (doc.tabs || []).find((t: any) => t.tabProperties?.tabId === tab_id);
+          // NOTE: query string must be the `path` (3rd) positional arg, not `method` (4th).
+          const doc = await docsRequest(accessToken, document_id, "?includeTabsContent=true") as DocsDocument;
+          const tab = (doc.tabs || []).find(t => t.tabProperties?.tabId === tab_id);
           if (!tab) throw new Error(`Tab ${tab_id} not found`);
           const content = tab.documentTab?.body?.content || [];
-          const text = content.map((el: any) =>
-            el.paragraph?.elements?.map((e: any) => e.textRun?.content || "").join("") || ""
+          const text = content.map(el =>
+            el.paragraph?.elements?.map(e => e.textRun?.content || "").join("") || ""
           ).join("").trim();
           return { content: [{ type: "text", text: text || "(empty tab)" }] };
         }
-  
+
         if (action === "create") {
-          const props: any = {};
+          const props: Record<string, unknown> = {};
           if (title) props.title = title;
           if (emoji) props.iconEmoji = emoji;
           if (parent_tab_id) props.parentTabId = parent_tab_id;
           const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
             requests: [{ addDocumentTab: { tabProperties: props } }],
-          }) as any;
+          }) as DocsBatchUpdateResponse;
           const newTabId = res.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
           return { content: [{ type: "text", text: `Tab created. ID: ${newTabId}` }] };
         }
@@ -1410,19 +1408,19 @@ function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFun
         const { accessToken } = await getCreds();
   
         if (action === "list") {
-          const doc = await docsRequest(accessToken, document_id) as any;
+          const doc = await docsRequest(accessToken, document_id) as DocsDocument;
           const ranges = doc.namedRanges || {};
-          const entries = Object.entries(ranges).flatMap(([n, v]: [string, any]) =>
-            v.namedRanges.map((r: any) => `"${n}" | ID: ${r.namedRangeId} | [${r.ranges?.[0]?.startIndex}-${r.ranges?.[0]?.endIndex}]`)
+          const entries = Object.entries(ranges).flatMap(([n, v]) =>
+            (v.namedRanges || []).map(r => `"${n}" | ID: ${r.namedRangeId} | [${r.ranges?.[0]?.startIndex}-${r.ranges?.[0]?.endIndex}]`)
           );
           return { content: [{ type: "text", text: entries.length ? entries.join("\n") : "No named ranges." }] };
         }
-  
+
         if (action === "create") {
           if (!name || start_index === undefined || end_index === undefined) throw new Error("name, start_index, end_index required");
           const res = await docsRequest(accessToken, document_id, ":batchUpdate", "POST", {
             requests: [{ createNamedRange: { name, range: { startIndex: start_index, endIndex: end_index } } }],
-          }) as any;
+          }) as DocsBatchUpdateResponse;
           return { content: [{ type: "text", text: `Named range "${name}" created. ID: ${res.replies?.[0]?.createNamedRange?.namedRangeId}` }] };
         }
   
@@ -1459,26 +1457,26 @@ function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFun
         const base = `https://www.googleapis.com/drive/v3/files/${document_id}/comments`;
   
         if (action === "list") {
-          const data = await googleFetch(`${base}?fields=comments(id,content,author,createdTime,replies)&maxResults=50`, accessToken) as any;
+          const data = await googleFetch(`${base}?fields=comments(id,content,author,createdTime,replies)&maxResults=50`, accessToken) as DriveCommentListResponse;
           const comments = data.comments || [];
           if (!comments.length) return { content: [{ type: "text", text: "No comments." }] };
-          const lines = comments.map((c: any) =>
-            `[${c.id}] ${c.author?.displayName}: ${c.content} (${new Date(c.createdTime).toLocaleDateString()})`
+          const lines = comments.map(c =>
+            `[${c.id}] ${c.author?.displayName}: ${c.content} (${c.createdTime ? new Date(c.createdTime).toLocaleDateString() : "?"})`
           );
           return { content: [{ type: "text", text: lines.join("\n") }] };
         }
-  
+
         if (action === "add") {
           if (!content) throw new Error("content required");
-          const body: any = { content };
+          const body: Record<string, unknown> = { content };
           if (anchor) body.anchor = `{"r":"head","a":[{"l":"${anchor.start_index},${anchor.end_index}"}]}`;
-          const res = await googleFetch(base, accessToken, "POST", body) as any;
+          const res = await googleFetch(base, accessToken, "POST", body) as DriveComment;
           return { content: [{ type: "text", text: `Comment added. ID: ${res.id}` }] };
         }
-  
+
         if (action === "reply") {
           if (!comment_id || !content) throw new Error("comment_id and content required");
-          const res = await googleFetch(`${base}/${comment_id}/replies`, accessToken, "POST", { content }) as any;
+          const res = await googleFetch(`${base}/${comment_id}/replies`, accessToken, "POST", { content }) as DriveComment;
           return { content: [{ type: "text", text: `Reply added. ID: ${res.id}` }] };
         }
   
@@ -1500,9 +1498,7 @@ function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFun
         const { accessToken } = await getCreds();
   
         if (action === "list") {
-          const doc = await docsRequest(accessToken, document_id) as any;
-          const suggestions = doc.suggestionsViewMode === "SUGGESTIONS_INLINE" ? [] : [];
-          // Get suggestions via batchUpdate dry-run or via the doc body
+          const doc = await docsRequest(accessToken, document_id) as DocsDocument;
           const body = doc.body?.content || [];
           const found: string[] = [];
           for (const el of body) {
@@ -1510,7 +1506,7 @@ function _registerDocsConsolidatedTools(server: McpServer, getCreds: GetCredsFun
               for (const e of el.paragraph.elements) {
                 if (e.textRun?.suggestedInsertionIds?.length || e.textRun?.suggestedDeletionIds?.length) {
                   const ids = [...(e.textRun.suggestedInsertionIds || []), ...(e.textRun.suggestedDeletionIds || [])];
-                  found.push(...ids.map((id: string) => `ID: ${id} | Text: "${e.textRun.content?.trim()}"`));
+                  found.push(...ids.map((id: string) => `ID: ${id} | Text: "${e.textRun?.content?.trim()}"`));
                 }
               }
             }

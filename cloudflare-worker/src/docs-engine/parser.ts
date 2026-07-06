@@ -401,7 +401,7 @@ export function parseMarkdown(input: string): DocNode[] {
         }
         // markdown-it emits cell content as "inline" tokens (not "th"/"td")
         else if (cur.type === "inline" && inRow) {
-          const cellText = (cur.children as any[] || [])
+          const cellText = (cur.children || [])
             .map((c: any) => c.content || "")
             .join("")
             .trim();

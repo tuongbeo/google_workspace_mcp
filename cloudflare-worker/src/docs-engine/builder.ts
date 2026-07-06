@@ -428,8 +428,8 @@ export function buildExecutionPlan(
 // ── Theme requests ────────────────────────────────────────────────────────────
 
 function buildThemeRequests(themeName: string, fontPairName: string, alignment: string): object[] {
-  const colors = getTheme(themeName as any);
-  const fonts = getFontPair(fontPairName as any);
+  const colors = getTheme(themeName);
+  const fonts = getFontPair(fontPairName);
   const tok = deriveDocTokens(colors, fonts);
 
   function ns(styleType: string, colorHex: string, sizePt: number, bold: boolean, font: string,
