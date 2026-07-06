@@ -39,6 +39,13 @@ function encodeEmail(headers: string, body: string): string {
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+// Header-injection guard: a header value containing a raw CR/LF could inject
+// additional RFC822 headers (e.g. an extra "Bcc:" line) once concatenated into
+// the raw message. Strip any line breaks before a value is placed in a header.
+function sanitizeHeaderValue(v: string): string {
+  return v.replace(/[\r\n]+/g, " ").trim();
+}
+
 function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("search_gmail_messages", "Search Gmail messages using Gmail query syntax.", {
@@ -62,7 +69,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
     message_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ message_id }) => {
     const { accessToken } = await getCreds();
-    const data = await gmailRequest(accessToken, `/messages/${message_id}?format=full`) as GmailMessage;
+    const data = await gmailRequest(accessToken, `/messages/${encodeURIComponent(message_id)}?format=full`) as GmailMessage;
     const hdrs: Record<string, string> = {};
     for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
     const body = extractBody(data.payload);
@@ -83,15 +90,14 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
     message_ids: z.array(z.string()).describe("List of message IDs (max 20)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ message_ids }) => {
     const { accessToken } = await getCreds();
-    const results: string[] = [];
-    for (const id of message_ids.slice(0, 20)) {
+    const results = await Promise.all(message_ids.slice(0, 20).map(async (id) => {
       try {
-        const data = await gmailRequest(accessToken, `/messages/${id}?format=full`) as GmailMessage;
+        const data = await gmailRequest(accessToken, `/messages/${encodeURIComponent(id)}?format=full`) as GmailMessage;
         const hdrs: Record<string, string> = {};
         for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
-        results.push(`=== Message ${id} ===\nSubject: ${hdrs.subject || "(none)"}\nFrom: ${hdrs.from || "?"}\nDate: ${hdrs.date || ""}\n${extractBody(data.payload).substring(0, 500)}`);
-      } catch (e) { results.push(`=== Message ${id} === ERROR: ${e}`); }
-    }
+        return `=== Message ${id} ===\nSubject: ${hdrs.subject || "(none)"}\nFrom: ${hdrs.from || "?"}\nDate: ${hdrs.date || ""}\n${extractBody(data.payload).substring(0, 500)}`;
+      } catch (e) { return `=== Message ${id} === ERROR: ${e}`; }
+    }));
     return { content: [{ type: "text", text: results.join("\n\n") }] };
   }));
 
@@ -99,7 +105,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
     thread_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ thread_id }) => {
     const { accessToken } = await getCreds();
-    const data = await gmailRequest(accessToken, `/threads/${thread_id}?format=full`) as GmailThread;
+    const data = await gmailRequest(accessToken, `/threads/${encodeURIComponent(thread_id)}?format=full`) as GmailThread;
     const messages = data.messages || [];
     const lines = [`Thread ${thread_id} — ${messages.length} message(s)`, ""];
     for (const msg of messages) {
@@ -125,13 +131,13 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
   }, withErrorHandler(async ({ to, subject, body, cc, bcc, in_reply_to_message_id, html = false }) => {
     const { accessToken } = await getCreds();
     const contentType = html ? "text/html" : "text/plain";
-    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: ${contentType}; charset=utf-8`;
-    if (cc) headers += `\r\nCc: ${cc}`;
-    if (bcc) headers += `\r\nBcc: ${bcc}`;
-    if (in_reply_to_message_id) headers += `\r\nIn-Reply-To: <${in_reply_to_message_id}>`;
+    let headers = `To: ${sanitizeHeaderValue(to)}\r\nSubject: ${sanitizeHeaderValue(subject)}\r\nContent-Type: ${contentType}; charset=utf-8`;
+    if (cc) headers += `\r\nCc: ${sanitizeHeaderValue(cc)}`;
+    if (bcc) headers += `\r\nBcc: ${sanitizeHeaderValue(bcc)}`;
+    if (in_reply_to_message_id) headers += `\r\nIn-Reply-To: <${sanitizeHeaderValue(in_reply_to_message_id)}>`;
     const payload: Record<string, unknown> = { raw: encodeEmail(headers, body) };
     if (in_reply_to_message_id) {
-      const orig = await gmailRequest(accessToken, `/messages/${in_reply_to_message_id}?format=minimal`) as GmailMessage;
+      const orig = await gmailRequest(accessToken, `/messages/${encodeURIComponent(in_reply_to_message_id)}?format=minimal`) as GmailMessage;
       if (orig?.threadId) payload.threadId = orig.threadId;
     }
     const result = await gmailRequest(accessToken, "/messages/send", "POST", payload) as GmailMessage;
@@ -150,20 +156,20 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
   }, withErrorHandler(async ({ to, subject, body, cc, bcc, html = false, in_reply_to_message_id, include_quoted_content = false }) => {
     const { accessToken } = await getCreds();
     const contentType = html ? "text/html" : "text/plain";
-    let headers = `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: ${contentType}; charset=utf-8`;
-    if (cc) headers += `\r\nCc: ${cc}`;
-    if (bcc) headers += `\r\nBcc: ${bcc}`;
+    let headers = `To: ${sanitizeHeaderValue(to)}\r\nSubject: ${sanitizeHeaderValue(subject)}\r\nContent-Type: ${contentType}; charset=utf-8`;
+    if (cc) headers += `\r\nCc: ${sanitizeHeaderValue(cc)}`;
+    if (bcc) headers += `\r\nBcc: ${sanitizeHeaderValue(bcc)}`;
 
     const payload: Record<string, unknown> = {};
     let finalBody = body;
 
     if (in_reply_to_message_id) {
-      const origMsg = await gmailRequest(accessToken, `/messages/${in_reply_to_message_id}?format=full`) as GmailMessage;
+      const origMsg = await gmailRequest(accessToken, `/messages/${encodeURIComponent(in_reply_to_message_id)}?format=full`) as GmailMessage;
       const origHdrs: Record<string, string> = {};
       for (const h of origMsg?.payload?.headers || []) origHdrs[h.name.toLowerCase()] = h.value;
 
-      const origMsgId = origHdrs["message-id"] || "";
-      const origRefs  = origHdrs["references"] || "";
+      const origMsgId = sanitizeHeaderValue(origHdrs["message-id"] || "");
+      const origRefs  = sanitizeHeaderValue(origHdrs["references"] || "");
       if (origMsgId) {
         headers += `\r\nIn-Reply-To: ${origMsgId}`;
         headers += `\r\nReferences: ${origRefs ? `${origRefs} ${origMsgId}` : origMsgId}`;
@@ -211,14 +217,16 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
       const result = await gmailRequest(accessToken, "/labels", "POST", body) as GmailLabel;
       return { content: [{ type: "text", text: `Label created: "${result.name}" (ID: ${result.id})` }] };
     } else if (action === "update") {
+      if (!label_id) throw new Error("label_id required for update");
       const body: Record<string, unknown> = {};
       if (name) body.name = name;
       if (message_list_visibility) body.messageListVisibility = message_list_visibility;
       if (label_list_visibility) body.labelListVisibility = label_list_visibility;
-      const result = await gmailRequest(accessToken, `/labels/${label_id}`, "PATCH", body) as GmailLabel;
+      const result = await gmailRequest(accessToken, `/labels/${encodeURIComponent(label_id)}`, "PATCH", body) as GmailLabel;
       return { content: [{ type: "text", text: `Label updated: "${result.name}"` }] };
     } else {
-      await gmailRequest(accessToken, `/labels/${label_id}`, "DELETE");
+      if (!label_id) throw new Error("label_id required for delete");
+      await gmailRequest(accessToken, `/labels/${encodeURIComponent(label_id)}`, "DELETE");
       return { content: [{ type: "text", text: `Label ${label_id} deleted.` }] };
     }
   }));
@@ -229,7 +237,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
     remove_labels: z.array(z.string()).optional(),
   }, withErrorHandler(async ({ message_id, add_labels = [], remove_labels = [] }) => {
     const { accessToken } = await getCreds();
-    await gmailRequest(accessToken, `/messages/${message_id}/modify`, "POST", { addLabelIds: add_labels, removeLabelIds: remove_labels });
+    await gmailRequest(accessToken, `/messages/${encodeURIComponent(message_id)}/modify`, "POST", { addLabelIds: add_labels, removeLabelIds: remove_labels });
     return { content: [{ type: "text", text: `Message ${message_id} labels updated.` }] };
   }));
 
@@ -248,7 +256,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
     attachment_id: z.string(),
   }, withErrorHandler(async ({ message_id, attachment_id }) => {
     const { accessToken } = await getCreds();
-    const data = await gmailRequest(accessToken, `/messages/${message_id}/attachments/${attachment_id}`) as GmailAttachment;
+    const data = await gmailRequest(accessToken, `/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`) as GmailAttachment;
     return { content: [{ type: "text", text: `Attachment size: ${data.size} bytes\nData (base64): ${(data.data || "").substring(0, 200)}...` }] };
   }));
 }
@@ -260,19 +268,18 @@ function _registerGmailExtra(server: McpServer, getCreds: GetCredsFunc) {
     thread_ids: z.array(z.string()).describe("List of thread IDs (max 10)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ thread_ids }) => {
     const { accessToken } = await getCreds();
-    const results: string[] = [];
-    for (const id of thread_ids.slice(0, 10)) {
+    const results = await Promise.all(thread_ids.slice(0, 10).map(async (id) => {
       try {
-        const data = await gmailRequest(accessToken, `/threads/${id}?format=full`) as GmailThread;
+        const data = await gmailRequest(accessToken, `/threads/${encodeURIComponent(id)}?format=full`) as GmailThread;
         const messages = data.messages || [];
         const summary = messages.map(msg => {
           const hdrs: Record<string, string> = {};
           for (const h of msg.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
           return `[${hdrs.date || "?"}] ${hdrs.from || "?"}: ${hdrs.subject || "(none)"}`;
         }).join("\n");
-        results.push(`=== Thread ${id} (${messages.length} msgs) ===\n${summary}`);
-      } catch (e) { results.push(`=== Thread ${id} === ERROR: ${e}`); }
-    }
+        return `=== Thread ${id} (${messages.length} msgs) ===\n${summary}`;
+      } catch (e) { return `=== Thread ${id} === ERROR: ${e}`; }
+    }));
     return { content: [{ type: "text", text: results.join("\n\n") }] };
   }));
 
@@ -306,7 +313,8 @@ function _registerGmailExtra(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ action, filter_id, from, to, subject, query, add_label_ids, remove_label_ids, forward_to, mark_as_read, archive }) => {
     const { accessToken } = await getCreds();
     if (action === "delete") {
-      await gmailRequest(accessToken, `/settings/filters/${filter_id}`, "DELETE");
+      if (!filter_id) throw new Error("filter_id required for delete");
+      await gmailRequest(accessToken, `/settings/filters/${encodeURIComponent(filter_id)}`, "DELETE");
       return { content: [{ type: "text", text: `Filter ${filter_id} deleted.` }] };
     }
     const criteria: Record<string, string> = {};

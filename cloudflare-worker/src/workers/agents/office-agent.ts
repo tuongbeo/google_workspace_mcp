@@ -142,14 +142,21 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
   } as any);
 
   async init() {
-    if (!this.props) throw new Error("OfficeAgent.init() called before OAuth props were set");
+    if (!this.props) throw new Error("OfficeAgent.init() called before OAuth props were set.");
     const sub       = this.props.google_sub;
     const namespace = this.env.TOKEN_NAMESPACE ?? "office";
     const getCreds  = makeGetCreds(sub, this.env, namespace);
-    const preset    = this.env.TOOLS_PRESET ?? "all";
-    const load     = (name: string) => preset === "all" || preset === name;
+    const VALID_PRESETS = ["all", "docs", "sheets", "slides", "drive", "forms", "appsscript", "tasks"];
+    const requestedPreset = this.env.TOOLS_PRESET ?? "all";
+    // An unrecognized preset must not silently disable every tool category —
+    // fall back to "all" and log loudly so a config typo is visible.
+    const preset = VALID_PRESETS.includes(requestedPreset) ? requestedPreset : "all";
+    if (preset !== requestedPreset) {
+      console.error(`[office-agent] TOOLS_PRESET="${requestedPreset}" is not one of ${VALID_PRESETS.join(", ")} — falling back to "all" instead of loading no tools.`);
+    }
+    const load = (name: string) => preset === "all" || preset === name;
 
-    console.log(`[office-agent] init for sub=${sub}, preset=${preset}`);
+    console.log(`[office-agent] init for sub=***${sub.slice(-4)}, preset=${preset}`);
 
     if (load("docs"))
       registerDocsTools(withSkip(this.server, SKIP_DOCS), getCreds);

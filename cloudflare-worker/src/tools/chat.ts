@@ -11,6 +11,27 @@ import type {
   ChatSpaceListResponse, ChatMessageListResponse, ChatMessage, ChatReaction, ChatAttachment,
 } from "./google-api-types";
 
+// Chat resource names are themselves multi-segment REST paths (e.g.
+// "spaces/{s}/messages/{m}"), so they can't just be encodeURIComponent'd as a
+// single opaque ID without breaking the intended path shape. Instead, validate
+// the whole name matches exactly the expected segment structure — each segment
+// is restricted to non-slash, non-whitespace characters, which also rules out
+// "../"-style traversal or appending extra unintended path segments/queries.
+function assertResourceName(name: string, pattern: RegExp, description: string): void {
+  if (!pattern.test(name)) {
+    throw new Error(`Invalid resource name "${name}" — expected format: ${description}`);
+  }
+}
+const SPACE_NAME_RE = /^spaces\/[^/\s?#]+$/;
+const MESSAGE_NAME_RE = /^spaces\/[^/\s?#]+\/messages\/[^/\s?#]+$/;
+const ATTACHMENT_NAME_RE = /^spaces\/[^/\s?#]+\/messages\/[^/\s?#]+\/attachments\/[^/\s?#]+$/;
+
+// ISO 8601-ish datetime guard for values spliced into a Chat API filter string.
+const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
+function assertIsoDatetime(v: string, field: string): void {
+  if (!ISO_DATETIME_RE.test(v)) throw new Error(`${field} must be an ISO 8601 datetime, e.g. "2025-01-01T00:00:00Z" — got "${v}"`);
+}
+
 function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("list_chat_spaces", "List Google Chat spaces the user is in.", {
     page_size: z.number().optional().default(20),
@@ -29,6 +50,7 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
     filter: z.string().optional().describe("API filter string, e.g. 'createTime > \"2025-01-01T00:00:00Z\"' or 'sender.name = \"users/123\"'"),
     order_by: z.enum(["createTime asc", "createTime desc"]).optional().default("createTime desc"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ space_name, page_size = 20, filter, order_by = "createTime desc" }) => {
+    assertResourceName(space_name, SPACE_NAME_RE, "spaces/{spaceId}");
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ pageSize: String(page_size), orderBy: order_by });
     if (filter) params.set("filter", filter);
@@ -48,6 +70,7 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
     space_name: z.string().describe("Space name like 'spaces/{spaceId}'"),
     text: z.string(),
   }, withErrorHandler(async ({ space_name, text }) => {
+    assertResourceName(space_name, SPACE_NAME_RE, "spaces/{spaceId}");
     const { accessToken } = await getCreds();
     const result = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages`, accessToken, "POST", { text }) as ChatMessage;
     return { content: [{ type: "text", text: `Message sent! Message name: ${result.name}` }] };
@@ -62,9 +85,16 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 20, create_time_after, create_time_before, space_name }) => {
     const { accessToken } = await getCreds();
     const filters: string[] = [];
-    if (create_time_after) filters.push(`createTime > "${create_time_after}"`);
-    if (create_time_before) filters.push(`createTime < "${create_time_before}"`);
-    if (space_name) filters.push(`space = "spaces/${space_name.replace(/^spaces\//, "")}"`);
+    // Values are validated as ISO datetimes above before being embedded in the
+    // filter string, so there's no free-text content here that could break out
+    // of the quoted literal or inject additional filter clauses.
+    if (create_time_after) { assertIsoDatetime(create_time_after, "create_time_after"); filters.push(`createTime > "${create_time_after}"`); }
+    if (create_time_before) { assertIsoDatetime(create_time_before, "create_time_before"); filters.push(`createTime < "${create_time_before}"`); }
+    if (space_name) {
+      const normalized = space_name.startsWith("spaces/") ? space_name : `spaces/${space_name}`;
+      assertResourceName(normalized, SPACE_NAME_RE, "spaces/{spaceId}");
+      filters.push(`space = "${normalized}"`);
+    }
     const params = new URLSearchParams({ query, pageSize: String(Math.min(page_size, 25)) });
     if (filters.length) params.set("filter", filters.join(" AND "));
     const data = await googleFetch(`https://chat.googleapis.com/v1/spaces/messages:search?${params}`, accessToken) as ChatMessageListResponse;
@@ -82,6 +112,7 @@ function _registerChatReactions(server: McpServer, getCreds: GetCredsFunc) {
     message_name: z.string().describe("Message name in format 'spaces/{space}/messages/{message}'"),
     emoji: z.string().describe("Unicode emoji character, e.g. '👍' or '🎉'"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ message_name, emoji }) => {
+    assertResourceName(message_name, MESSAGE_NAME_RE, "spaces/{spaceId}/messages/{messageId}");
     const { accessToken } = await getCreds();
     const result = await googleFetch(`https://chat.googleapis.com/v1/${message_name}/reactions`, accessToken, "POST", {
       emoji: { unicode: emoji }
@@ -92,6 +123,7 @@ function _registerChatReactions(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("download_chat_attachment", "Get metadata and download info for a Google Chat message attachment.", {
     attachment_name: z.string().describe("Attachment resource name, e.g. 'spaces/{space}/messages/{message}/attachments/{attachment}'"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ attachment_name }) => {
+    assertResourceName(attachment_name, ATTACHMENT_NAME_RE, "spaces/{spaceId}/messages/{messageId}/attachments/{attachmentId}");
     const { accessToken } = await getCreds();
     const data = await googleFetch(`https://chat.googleapis.com/v1/${attachment_name}`, accessToken) as ChatAttachment;
     const lines = [

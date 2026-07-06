@@ -9,11 +9,13 @@ export type GetCredsFunc = () => Promise<{ accessToken: string }>;
 // Available as `this.props` inside GoogleWorkspaceAgent.
 // Declared as `type` (not `interface`) so it structurally satisfies McpAgent's
 // `Record<string, unknown>` props constraint — interfaces don't get TS's
-// implicit index signature inference that type literals do.
+// implicit index signature inference that type literals do. The explicit
+// index signature below guarantees the constraint is met either way.
 export type OAuthProps = {
   google_sub: string;  // Stable Google user ID (userinfo.sub)
   email:      string;  // Google account email
-}
+  [key: string]: unknown;
+};
 
 export interface Env {
   // ─── Google OAuth 2.0 credentials (used for token refresh fallback) ───────────
@@ -44,7 +46,8 @@ export interface Env {
   // Must match the `namespace` passed to createWorker() in that worker's entry
   // point, and the `tokens:{namespace}:{sub}` KV keys used by google-tokens.ts.
   TOKEN_NAMESPACE?: string;
-  TOOLS_PRESET?:    string;
+  // Optional per-deployment tool scoping.
+  TOOLS_PRESET?: string;  // "all" | "docs" | "sheets" | "slides" | "drive" | "forms" | "appsscript" | "tasks"
 }
 
 export interface StoredTokenRecord {

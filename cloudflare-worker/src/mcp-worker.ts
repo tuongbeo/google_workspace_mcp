@@ -35,9 +35,9 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
   } as any);
 
   async init() {
-    if (!this.props) throw new Error("GoogleWorkspaceAgent.init() called before OAuth props were set");
+    if (!this.props) throw new Error("GoogleWorkspaceAgent.init() called before OAuth props were set.");
     const sub = this.props.google_sub;
-    console.log(`[agent] init for sub=${sub}, email=${this.props.email}`);
+    console.log(`[agent] init for sub=***${sub.slice(-4)}`);
 
     const namespace = this.env.TOKEN_NAMESPACE ?? "workspace";
     const getCreds  = makeGetCreds(sub, this.env, namespace);

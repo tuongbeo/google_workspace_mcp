@@ -32,7 +32,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     });
     if (language) params.set("lr", language);
     if (sort) params.set("sort", sort);
-    const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
+    const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`, { signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) throw new Error(`Search failed: ${await resp.text()}`);
     const data = await resp.json() as CustomSearchResponse;
     const items = data.items || [];
@@ -63,7 +63,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
       siteSearch: site_search,
       num: String(Math.min(num, 10)),
     });
-    const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
+    const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`, { signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) throw new Error(`Search failed: ${await resp.text()}`);
     const data = await resp.json() as CustomSearchResponse;
     const items = data.items || [];
@@ -80,7 +80,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     if (!env.GOOGLE_PSE_API_KEY || !env.GOOGLE_PSE_ENGINE_ID) {
       return { content: [{ type: "text", text: "Custom Search not configured." }] };
     }
-    const resp = await fetch(`https://www.googleapis.com/customsearch/v1/cse?key=${env.GOOGLE_PSE_API_KEY}&cx=${env.GOOGLE_PSE_ENGINE_ID}`);
+    const resp = await fetch(`https://www.googleapis.com/customsearch/v1/cse?key=${env.GOOGLE_PSE_API_KEY}&cx=${env.GOOGLE_PSE_ENGINE_ID}`, { signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) throw new Error(`API error: ${await resp.text()}`);
     const data = await resp.json() as CustomSearchEngineInfo;
     return { content: [{ type: "text", text: `Search Engine: ${data.title || "N/A"}\nCX: ${env.GOOGLE_PSE_ENGINE_ID}\nKind: ${data.kind || "N/A"}` }] };

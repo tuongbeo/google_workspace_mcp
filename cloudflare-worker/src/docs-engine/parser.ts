@@ -219,28 +219,34 @@ export function parseMarkdown(input: string): DocNode[] {
     return tokensToInlineWithMentions(toks, mentionMap);
   }
 
-  /**
-   * Parse a bullet_list_open/ordered_list_open token (at `tokens[start]`),
-   * recursing into nested lists so nested items are preserved as `subItems`
-   * instead of being dropped/misread as the parent item's own close token.
-   * Returns the index just past the matching list-close token.
-   */
-  function parseListTokens(start: number): { items: ListItem[]; isCheckbox: boolean; nextIndex: number } {
-    const closeType = tokens[start].type === "ordered_list_open" ? "ordered_list_close" : "bullet_list_close";
-    let i = start + 1;
+  // Recursively parse a (possibly nested) bullet/ordered list starting at
+  // tokens[startIdx] (a bullet_list_open/ordered_list_open token). Nested
+  // lists are markdown-it's own bullet_list_open/list_item_open/... sequence
+  // emitted *inside* the parent item's token range — walking with a flat
+  // "stop at the first list_item_close" loop (the old implementation) means
+  // that close belongs to the nested list's first item, not the outer one,
+  // corrupting or dropping sibling content. Recursing here keeps each
+  // nesting level's tokens correctly scoped.
+  function parseListBlock(startIdx: number): { items: ListItem[]; isOrdered: boolean; isCheckbox: boolean; nextIndex: number } {
+    const open = tokens[startIdx];
+    const isOrdered = open.type === "ordered_list_open";
+    const closeType = isOrdered ? "ordered_list_close" : "bullet_list_close";
+    let j = startIdx + 1;
     const items: ListItem[] = [];
     let isCheckbox = false;
 
-    while (i < tokens.length && tokens[i].type !== closeType) {
-      if (tokens[i].type !== "list_item_open") { i++; continue; }
-      i++;
+    while (j < tokens.length && tokens[j].type !== closeType) {
+      if (tokens[j].type !== "list_item_open") { j++; continue; }
+      j++;
+
       let checked: boolean | undefined = undefined;
       const itemInlines: InlineNode[] = [];
       let subItems: ListItem[] | undefined;
 
-      while (i < tokens.length && tokens[i].type !== "list_item_close") {
-        const cur = tokens[i];
-        if (cur.type === "paragraph_open" || cur.type === "paragraph_close") { i++; continue; }
+      while (j < tokens.length && tokens[j].type !== "list_item_close") {
+        const cur = tokens[j];
+        if (cur.type === "paragraph_open" || cur.type === "paragraph_close") { j++; continue; }
+
         if (cur.type === "inline") {
           let raw = cur.content;
           // Detect checkbox: "[ ] text" or "[x] text"
@@ -251,21 +257,22 @@ export function parseMarkdown(input: string): DocNode[] {
             raw = cbMatch[2];
           }
           itemInlines.push(...parseInline(raw));
-          i++;
+          j++;
           continue;
         }
         if (cur.type === "bullet_list_open" || cur.type === "ordered_list_open") {
-          const nested = parseListTokens(i);
-          subItems = (subItems ?? []).concat(nested.items);
-          i = nested.nextIndex;
+          const nested = parseListBlock(j);
+          subItems = (subItems || []).concat(nested.items);
+          j = nested.nextIndex;
           continue;
         }
-        i++;
+        j++;
       }
       items.push({ children: itemInlines, checked, subItems });
-      i++; // skip list_item_close
+      j++; // skip list_item_close
     }
-    return { items, isCheckbox, nextIndex: i + 1 }; // +1 to skip the list close token
+    return { items, isOrdered, isCheckbox, nextIndex: j + 1 }; // +1 skips the closeType token
+
   }
 
   // Collect footnote defs — strip them from the processed content
@@ -342,12 +349,13 @@ export function parseMarkdown(input: string): DocNode[] {
       continue;
     }
 
-    // Bullet / ordered / task lists
+    // Bullet / ordered / task lists (recurses into nested sub-lists — see parseListBlock)
     if (t.type === "bullet_list_open" || t.type === "ordered_list_open") {
-      const listResult = parseListTokens(i);
-      const listType = listResult.isCheckbox ? "checkbox" : (t.type === "ordered_list_open" ? "numbered" : "bullet");
-      nodes.push({ type: "bullet_list", items: listResult.items, listType });
-      i = listResult.nextIndex;
+      const { items, isOrdered, isCheckbox, nextIndex } = parseListBlock(i);
+      const listType = isCheckbox ? "checkbox" : (isOrdered ? "numbered" : "bullet");
+      nodes.push({ type: "bullet_list", items, listType });
+      i = nextIndex;
+
       continue;
     }
 

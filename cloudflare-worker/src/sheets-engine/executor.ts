@@ -25,6 +25,17 @@ function gr(sheetId: number, r0: number, r1: number, c0: number, c1: number) {
   return { sheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: c0, endColumnIndex: c1 };
 }
 
+/**
+ * Guard against Sheets/CSV formula injection: with valueInputOption=USER_ENTERED,
+ * Sheets treats any string starting with =, +, -, or @ as a live formula/expression.
+ * Prefixing with a bare apostrophe forces literal-text interpretation (the
+ * apostrophe itself is not stored/displayed) without changing the visible value
+ * for any input that wasn't already formula-shaped.
+ */
+export function defuseFormula(v: string): string {
+  return /^[=+\-@]/.test(v) ? `'${v}` : v;
+}
+
 function colLetter(n: number): string {
   return n < 26
     ? String.fromCharCode(65 + n)
@@ -92,10 +103,13 @@ async function pass2DataWrite(
       if (v === null) return "";
       const type = (colConfigs[ci]?.type ?? columns[ci]?.type) as ColumnType;
       if (type === "image_formula" && typeof v === "string"
-          && /\.(png|jpg|jpeg|gif|svg|webp)/i.test(v)) {
-        return `=IMAGE("${v}",1)`;
+          && /^https?:\/\//i.test(v) && /\.(png|jpg|jpeg|gif|svg|webp)/i.test(v)) {
+        // Escape embedded quotes so the value can't break out of the formula's
+        // string literal and inject additional formula calls.
+        return `=IMAGE("${v.replace(/"/g, '""')}",1)`;
       }
-      if (chipCols.has(ci)) return String(v); // placeholder, replaced by updateCells below
+      if (chipCols.has(ci)) return typeof v === "string" ? defuseFormula(v) : String(v); // placeholder, replaced by updateCells below
+      if (typeof v === "string") return defuseFormula(v);
       return v;
     });
     writeValues.push(cells);
@@ -118,7 +132,9 @@ async function pass2DataWrite(
   for (const col of columns) {
     const cfg = colConfigs[col.index];
     const type = cfg?.type ?? col.type;
-    const fmt = buildNumberFormat(type, cfg?.format, isVi);
+    // Prefer the format already computed during parsing (locale-aware — e.g.
+    // dd/MM/yyyy for Vietnamese-locale sheets) instead of recomputing without isVi.
+    const fmt = col.format ?? buildNumberFormat(type, cfg?.format, isVi);
     if (fmt && numRows > 0) {
       fmtReqs.push({
         repeatCell: {
@@ -473,6 +489,23 @@ async function pass3Styling(
     }
   }
 
+  // conditional_rules — raw custom conditional-format rules (range + Sheets API
+  // condition/format objects), a documented escape hatch for cases the
+  // higher-level conditional_highlight/status options don't cover.
+  if (opts.conditional_rules?.length) {
+    for (const rule of opts.conditional_rules) {
+      reqs2.push({
+        addConditionalFormatRule: {
+          rule: {
+            ranges: [parseA1Range(rule.range, sheetId)],
+            booleanRule: { condition: rule.condition, format: rule.format },
+          },
+          index: 0,
+        },
+      });
+    }
+  }
+
   // auto resize
   if (opts.auto_resize_columns) {
     reqs2.push({
@@ -515,6 +548,15 @@ async function pass3Styling(
       await sheetsRequest(accessToken, spreadsheetId,
         `/values/${encodeURIComponent(labelRange)}?valueInputOption=RAW`, "PUT",
         { range: labelRange, values: [[sh.label]] });
+      if (sh.indent_rows) {
+        await batchUpdate(accessToken, spreadsheetId, [{
+          repeatCell: {
+            range: gr(sheetId, insertAt, insertAt + 1, 0, 1),
+            cell: { userEnteredFormat: { padding: { left: 24 } } },
+            fields: "userEnteredFormat.padding",
+          },
+        }]);
+      }
       insertedSectionCount++;
     }
   }

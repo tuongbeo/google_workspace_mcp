@@ -7,6 +7,13 @@
 import type { DocNode, InlineNode, ListItem, RichElement, ExecutionPlan } from "./types";
 import { getTheme, getFontPair, deriveDocTokens } from "../styles";
 
+// Only allow schemes a hyperlink/image URL can legitimately need — blocks
+// javascript:/data:/file:/vbscript: etc. from being written into a document.
+const SAFE_URL_SCHEME_RE = /^(https?|mailto):/i;
+export function isSafeDocUrl(url: string): boolean {
+  return SAFE_URL_SCHEME_RE.test(url.trim());
+}
+
 export function hexToRgb(hex: string) {
   const h = hex.replace("#", "");
   return {
@@ -17,28 +24,40 @@ export function hexToRgb(hex: string) {
 }
 
 // ── Placeholders — ASCII-safe ─────────────────────────────────────────────────
-// Format: __TAG_NNN__  = 12 chars (safe for Google Docs replaceAllText API)
+// Format: __TAG_NNN__ (typically 11 chars for a 3-letter tag + 3-digit counter,
+// but the counter widens past 999). Do not hardcode a fixed length anywhere —
+// see _phLens below, which records each placeholder's *actual* length in the
+// order generated so applyInlineStyles can consume the true length rather than
+// guess it.
 
 let _counter = 0;
 function uid(): string { return (++_counter).toString(10).padStart(3, "0"); }
 function makePH(tag: string): string { return `__${tag}_${uid()}__`; }
-export const PH_LEN = 12; // __XXX_NNN__ = 12 chars
+/** @deprecated kept only as a fallback if _phLens is ever exhausted; use the real placeholder length instead. */
+export const PH_LEN = 12;
 
 let _rich: RichElement[] = [];
+// FIFO of inline-placeholder lengths, in the exact order inlinesToText/buildListText
+// generate them. applyInlineStyles walks the same node trees in the same order in a
+// later pass, so shifting from this queue always lines up with the right placeholder.
+let _phLens: number[] = [];
 
 function imgPH(url: string, alt?: string, w?: number, h?: number): string {
   const ph = makePH("IMG");
   _rich.push({ type: "image", placeholder: ph, url, widthPt: w, heightPt: h });
+  _phLens.push(ph.length);
   return ph;
 }
 function mentionPH(name: string, email: string): string {
   const ph = makePH("MNT");
   _rich.push({ type: "mention", placeholder: ph, name, email });
+  _phLens.push(ph.length);
   return ph;
 }
 function footnotePH(refId: string): string {
   const ph = makePH("FNT");
   _rich.push({ type: "footnote", placeholder: ph, name: refId });
+  _phLens.push(ph.length);
   return ph;
 }
 function tocPH(): string {
@@ -107,15 +126,15 @@ function applyInlineStyles(nodes: InlineNode[], base: number, tabId: string | un
         const start = rel;
         rel = applyInlineStyles(n.children, base + start, tabId, reqs);
         if (rel > start) reqs.push(textStyleReq(base + start, base + rel, tabId, {
-          link: { url: n.url },
+          ...(isSafeDocUrl(n.url) ? { link: { url: n.url } } : {}),
           foregroundColor: { color: { rgbColor: { red: 0.07, green: 0.36, blue: 0.8 } } },
           underline: true,
         }));
         break;
       }
-      case "mention": rel += PH_LEN; break;
-      case "footnote_ref": rel += PH_LEN; break;
-      case "image": rel += PH_LEN; break;
+      case "mention": rel += _phLens.shift() ?? PH_LEN; break;
+      case "footnote_ref": rel += _phLens.shift() ?? PH_LEN; break;
+      case "image": rel += _phLens.shift() ?? PH_LEN; break;
       default: break;
     }
   }
@@ -192,6 +211,7 @@ export function buildExecutionPlan(
 ): ExecutionPlan {
   _counter = 0;
   _rich = [];
+  _phLens = [];
 
   const startIndex = opts.startIndex ?? 1;
   const tabId = opts.tabId;
