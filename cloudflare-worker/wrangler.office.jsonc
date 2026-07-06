@@ -8,6 +8,9 @@
   "vars": {
     "GOOGLE_AUTH_BASE_URL": "https://auth.lens.io.vn",
     "PUBLIC_BASE_URL":      "https://office.lens.io.vn",
+    // KV key prefix for stored Google tokens: tokens:{TOKEN_NAMESPACE}:{sub}.
+    // Must match the `namespace` field in src/workers/office.ts's config.
+    "TOKEN_NAMESPACE":      "office",
     // all = Docs + Sheets + Slides + Drive + Forms + Script + Tasks
     //     + Gmail + Calendar + Chat + Contacts + Search
     "TOOLS_PRESET":         "all"

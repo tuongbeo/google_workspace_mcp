@@ -7,7 +7,10 @@ export type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 // Props injected into McpAgent by OAuthProvider after Google auth completes.
 // Available as `this.props` inside GoogleWorkspaceAgent.
-export interface OAuthProps {
+// Declared as `type` (not `interface`) so it structurally satisfies McpAgent's
+// `Record<string, unknown>` props constraint — interfaces don't get TS's
+// implicit index signature inference that type literals do.
+export type OAuthProps = {
   google_sub: string;  // Stable Google user ID (userinfo.sub)
   email:      string;  // Google account email
 }
@@ -36,6 +39,12 @@ export interface Env {
   // ─── Google Custom Search (optional) ───────────────────────────────────────────
   GOOGLE_PSE_API_KEY?:    string;
   GOOGLE_PSE_ENGINE_ID?:  string;
+
+  // ─── Sub-worker config (office/plan/social — set via wrangler `vars`) ─────────
+  // Must match the `namespace` passed to createWorker() in that worker's entry
+  // point, and the `tokens:{namespace}:{sub}` KV keys used by google-tokens.ts.
+  TOKEN_NAMESPACE?: string;
+  TOOLS_PRESET?:    string;
 }
 
 export interface StoredTokenRecord {

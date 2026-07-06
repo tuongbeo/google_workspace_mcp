@@ -62,6 +62,10 @@ async function refreshWithRetry(
   retries = 3,
   namespace = "workspace",
 ): Promise<StoredTokenRecord> {
+  if (!record.refresh_token) {
+    throw new Error(`Cannot refresh: no refresh_token for ns=${namespace} sub=${sub}`);
+  }
+  const refreshToken = record.refresh_token;
   let lastErr: Error = new Error("unknown");
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -76,7 +80,7 @@ async function refreshWithRetry(
         grant_type:    "refresh_token",
         client_id:     googleClientId,
         client_secret: googleClientSecret,
-        refresh_token: record.refresh_token,
+        refresh_token: refreshToken,
       }).toString(),
     });
 
@@ -86,7 +90,7 @@ async function refreshWithRetry(
       };
       const updated: StoredTokenRecord = {
         access_token:         t.access_token,
-        refresh_token:        t.refresh_token || record.refresh_token,
+        refresh_token:        t.refresh_token || refreshToken,
         expires_at:           Math.floor(Date.now() / 1000) + (t.expires_in || 3600),
         scopes:               record.scopes,
         google_client_id:     googleClientId,

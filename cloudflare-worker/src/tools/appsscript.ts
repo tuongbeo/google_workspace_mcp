@@ -133,9 +133,12 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     description: z.string().optional(),
   }, withErrorHandler(async ({ script_id, deployment_id, version_number, description }) => {
     const { accessToken } = await getCreds();
-    const config: Record<string, unknown> = {};
-    if (version_number) config.versionNumber = version_number;
-    if (description) config.description = description;
+    // deployments.update replaces deploymentConfig wholesale, so unspecified
+    // fields must be carried over from the existing deployment or they're wiped.
+    const existing = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken) as any;
+    const config: Record<string, unknown> = { ...existing.deploymentConfig };
+    if (version_number !== undefined) config.versionNumber = version_number;
+    if (description !== undefined) config.description = description;
     await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "PUT", { deploymentConfig: config }) as any;
     return { content: [{ type: "text", text: `Deployment ${deployment_id} updated.` }] };
   }));
@@ -323,34 +326,37 @@ function _registerAppsScriptConsolidated(server: McpServer, getCreds: GetCredsFu
         deployment_id: z.string().optional().describe("Deployment ID (update/delete)"),
         version_number: z.number().int().optional().describe("Script version to deploy (create/update)"),
         description:   z.string().optional(),
-        access_level:  z.enum(["MYSELF","DOMAIN","ANYONE","ANYONE_ANONYMOUS"]).optional().default("MYSELF"),
+        access_level:  z.enum(["MYSELF","DOMAIN","ANYONE","ANYONE_ANONYMOUS"]).optional().describe("Defaults to MYSELF on create; leave unset on update to keep the existing access level"),
       },
       { readOnlyHint: false },
-      withErrorHandler(async ({ action, script_id, deployment_id, version_number, description, access_level = "MYSELF" }) => {
+      withErrorHandler(async ({ action, script_id, deployment_id, version_number, description, access_level }) => {
         const { accessToken } = await getCreds();
         const base = `https://script.googleapis.com/v1/projects/${script_id}/deployments`;
-  
+
         if (action === "list") {
           const data = await googleFetch(base, accessToken) as any;
           const deps = data.deployments || [];
           const lines = deps.map((d: any) => `ID: ${d.deploymentId} | ${d.deploymentConfig?.description || "(no desc)"} | v${d.deploymentConfig?.versionNumber}`);
           return { content: [{ type: "text", text: lines.join("\n") || "No deployments." }] };
         }
-  
+
         if (action === "create") {
-          const body: any = { deploymentConfig: { scriptId: script_id, access: access_level } };
+          const body: any = { deploymentConfig: { scriptId: script_id, access: access_level ?? "MYSELF" } };
           if (version_number) body.deploymentConfig.versionNumber = version_number;
           if (description) body.deploymentConfig.description = description;
           const res = await googleFetch(base, accessToken, "POST", body) as any;
           return { content: [{ type: "text", text: `Deployment created. ID: ${res.deploymentId}` }] };
         }
-  
+
         if (action === "update") {
           if (!deployment_id) throw new Error("deployment_id required");
-          const body: any = { deploymentConfig: {} };
-          if (version_number) body.deploymentConfig.versionNumber = version_number;
-          if (description) body.deploymentConfig.description = description;
-          if (access_level) body.deploymentConfig.access = access_level;
+          // deployments.update replaces deploymentConfig wholesale — merge with
+          // the existing config so unspecified fields (e.g. access) aren't wiped.
+          const existing = await googleFetch(`${base}/${deployment_id}`, accessToken) as any;
+          const body: any = { deploymentConfig: { ...existing.deploymentConfig } };
+          if (version_number !== undefined) body.deploymentConfig.versionNumber = version_number;
+          if (description !== undefined) body.deploymentConfig.description = description;
+          if (access_level !== undefined) body.deploymentConfig.access = access_level;
           const res = await googleFetch(`${base}/${deployment_id}`, accessToken, "PUT", body) as any;
           return { content: [{ type: "text", text: `Deployment ${res.deploymentId} updated.` }] };
         }

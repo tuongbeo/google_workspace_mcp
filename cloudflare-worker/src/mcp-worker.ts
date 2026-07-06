@@ -25,7 +25,6 @@ import { registerFormsTools } from "./tools/forms";
 import { registerContactsTools } from "./tools/contacts";
 import { registerAppsScriptTools } from "./tools/appsscript";
 import { registerSearchTools } from "./tools/search";
-import { registerCompositeTools } from "./tools/composite";
 
 export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, OAuthProps> {
   server = new McpServer({
@@ -36,10 +35,12 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
   } as any);
 
   async init() {
+    if (!this.props) throw new Error("GoogleWorkspaceAgent.init() called before OAuth props were set");
     const sub = this.props.google_sub;
     console.log(`[agent] init for sub=${sub}, email=${this.props.email}`);
 
-    const getCreds = makeGetCreds(sub, this.env);
+    const namespace = this.env.TOKEN_NAMESPACE ?? "workspace";
+    const getCreds  = makeGetCreds(sub, this.env, namespace);
 
     registerGmailTools(this.server, getCreds);
     registerCalendarTools(this.server, getCreds);
@@ -54,6 +55,5 @@ export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, O
     registerContactsTools(this.server, getCreds);
     registerAppsScriptTools(this.server, getCreds);
     registerSearchTools(this.server, getCreds, this.env);
-    registerCompositeTools(this.server, getCreds);
   }
 }

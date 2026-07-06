@@ -4,7 +4,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { googleFetch } from "../google";
+import { googleFetch, driveRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
 

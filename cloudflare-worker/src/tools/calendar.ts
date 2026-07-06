@@ -6,15 +6,18 @@ import { z } from "zod";
 import { calendarRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  CalendarListResponse, CalendarEvent, CalendarEventListResponse, FreeBusyResponse,
+} from "./google-api-types";
 
 
 export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_calendars", "List all Google calendars accessible to the user.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
-    const data = await calendarRequest(accessToken, "/users/me/calendarList") as any;
+    const data = await calendarRequest(accessToken, "/users/me/calendarList") as CalendarListResponse;
     const items = data.items || [];
-    const lines = items.map((c: any) => `- ${c.summary}${c.primary ? " (Primary)" : ""} | ID: ${c.id} | Color: ${c.backgroundColor || "N/A"}`);
+    const lines = items.map(c => `- ${c.summary}${c.primary ? " (Primary)" : ""} | ID: ${c.id} | Color: ${c.backgroundColor || "N/A"}`);
     return { content: [{ type: "text", text: `Calendars (${items.length}):\n${lines.join("\n")}` }] };
   }));
 
@@ -32,7 +35,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (time_max) params.set("timeMax", time_max);
     if (query) params.set("q", query);
     if (show_deleted) params.set("showDeleted", "true");
-    const data = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events?${params}`) as any;
+    const data = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events?${params}`) as CalendarEventListResponse;
     const events = data.items || [];
     if (!events.length) return { content: [{ type: "text", text: "No events found." }] };
     const lines = [`${events.length} events:`, ""];
@@ -42,9 +45,9 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       lines.push(`📅 ${ev.summary || "(no title)"}`);
       lines.push(`   Start: ${start} | End: ${end}`);
       if (ev.location) lines.push(`   Location: ${ev.location}`);
-      const meetUrl = ev.hangoutLink || ev.conferenceData?.entryPoints?.find((e: any) => e.entryPointType === "video")?.uri;
+      const meetUrl = ev.hangoutLink || ev.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri;
       if (meetUrl) lines.push(`   Meeting: ${meetUrl}`);
-      if (ev.attendees?.length) lines.push(`   Attendees: ${ev.attendees.map((a: any) => `${a.email} (${a.responseStatus})`).join(", ")}`);
+      if (ev.attendees?.length) lines.push(`   Attendees: ${ev.attendees.map(a => `${a.email} (${a.responseStatus})`).join(", ")}`);
       lines.push(`   ID: ${ev.id} | Status: ${ev.status} | Link: ${ev.htmlLink || "N/A"}`);
       lines.push("");
     }
@@ -56,7 +59,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     calendar_id: z.string().optional().default("primary"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ event_id, calendar_id = "primary" }) => {
     const { accessToken } = await getCreds();
-    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as any;
+    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as CalendarEvent;
     const lines = [
       `Event: ${ev.summary || "(no title)"}`, `ID: ${ev.id}`,
       `Status: ${ev.status}`, `Start: ${ev.start?.dateTime || ev.start?.date}`,
@@ -65,9 +68,9 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       `Description: ${ev.description || "N/A"}`, `Location: ${ev.location || "N/A"}`,
       `Link: ${ev.htmlLink || "N/A"}`,
     ];
-    if (ev.attendees?.length) lines.push(`Attendees:\n${ev.attendees.map((a: any) => `  - ${a.email}: ${a.responseStatus}`).join("\n")}`);
+    if (ev.attendees?.length) lines.push(`Attendees:\n${ev.attendees.map(a => `  - ${a.email}: ${a.responseStatus}`).join("\n")}`);
     if (ev.conferenceData?.entryPoints) {
-      const meet = ev.conferenceData.entryPoints.find((e: any) => e.entryPointType === "video");
+      const meet = ev.conferenceData.entryPoints.find(e => e.entryPointType === "video");
       if (meet) lines.push(`Google Meet: ${meet.uri}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -107,10 +110,10 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       event.conferenceData = { createRequest: { requestId: crypto.randomUUID(), conferenceSolutionKey: { type: "hangoutsMeet" } } };
     }
     const params = add_google_meet ? "?conferenceDataVersion=1" : "";
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events${params}`, "POST", event) as any;
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events${params}`, "POST", event) as CalendarEvent;
     let msg = `Event created: "${result.summary}"\nID: ${result.id}\nLink: ${result.htmlLink}`;
     if (add_google_meet && result.conferenceData?.entryPoints) {
-      const meet = result.conferenceData.entryPoints.find((e: any) => e.entryPointType === "video");
+      const meet = result.conferenceData.entryPoints.find(e => e.entryPointType === "video");
       if (meet) msg += `\nGoogle Meet: ${meet.uri}`;
     }
     return { content: [{ type: "text", text: msg }] };
@@ -139,7 +142,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (attendees?.length) patch.attendees = attendees.map(e => ({ email: e }));
     if (color_id) patch.colorId = color_id;
     if (visibility) patch.visibility = visibility;
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "PATCH", patch) as any;
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "PATCH", patch) as CalendarEvent;
     return { content: [{ type: "text", text: `Event updated: "${result.summary}"\nLink: ${result.htmlLink}` }] };
   }));
 
@@ -160,11 +163,11 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     comment: z.string().optional(),
   }, withErrorHandler(async ({ event_id, response, calendar_id = "primary", comment }) => {
     const { accessToken } = await getCreds();
-    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as any;
-    const attendees = (ev.attendees || []).map((a: any) =>
+    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as CalendarEvent;
+    const attendees = (ev.attendees || []).map(a =>
       a.self ? { ...a, responseStatus: response, comment: comment || a.comment } : a
     );
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`, "PATCH", { attendees }) as any;
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`, "PATCH", { attendees }) as CalendarEvent;
     return { content: [{ type: "text", text: `RSVP updated to "${response}" for event: "${result.summary}"` }] };
   }));
 
@@ -176,10 +179,10 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     const { accessToken } = await getCreds();
     const result = await calendarRequest(accessToken, "/freeBusy", "POST", {
       timeMin: time_min, timeMax: time_max, items: calendar_ids.map(id => ({ id })),
-    }) as any;
+    }) as FreeBusyResponse;
     const lines = ["Free/Busy Result:", ""];
     for (const [calId, info] of Object.entries(result.calendars || {})) {
-      const busy = (info as any).busy || [];
+      const busy = info.busy || [];
       lines.push(`Calendar: ${calId}`);
       if (!busy.length) lines.push("  → Free for entire range");
       else for (const slot of busy) lines.push(`  Busy: ${slot.start} → ${slot.end}`);

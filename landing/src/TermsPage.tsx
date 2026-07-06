@@ -107,7 +107,7 @@ export default function TermsPage() {
         <h2>11. Contact</h2>
         <p>
           For questions about these Terms, contact us at:{' '}
-          <a href="mailto:tuongpm@pila.vn">tuongpm@pila.vn</a>
+          <a href="mailto:manhtuongdz@gmail.com">manhtuongdz@gmail.com</a>
         </p>
       </div>
       <Footer />

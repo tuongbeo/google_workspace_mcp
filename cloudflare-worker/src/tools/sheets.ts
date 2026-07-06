@@ -599,7 +599,7 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
       const { accessToken } = await getCreds();
       const targetSheetId = target_sheet_id ?? source_sheet_id;
       const pivotTable: any = {
-        source: { sheetId: source_sheet_id, ...parseRange(source_range, source_sheet_id) },
+        source: parseRange(source_range, source_sheet_id),
         rows: rows.map(r => ({
           sourceColumnOffset: r.source_column,
           sortOrder: r.sort_order === "ASC" ? "ASCENDING" : "DESCENDING",

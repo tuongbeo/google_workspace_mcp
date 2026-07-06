@@ -6,6 +6,9 @@ import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  Person, SearchContactsResponse, BatchCreateContactsResponse, ContactGroup, ContactGroupListResponse,
+} from "./google-api-types";
 
 
 const PEOPLE_BASE = "https://people.googleapis.com/v1";
@@ -24,14 +27,14 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     } else {
       url = `${PEOPLE_BASE}/people/me/connections?personFields=names,emailAddresses,phoneNumbers&pageSize=${page_size}&sortOrder=FIRST_NAME_ASCENDING`;
     }
-    const data = await googleFetch(url, accessToken) as any;
-    const contacts = data.results?.map((r: any) => r.person) || data.connections || [];
+    const data = await googleFetch(url, accessToken) as SearchContactsResponse;
+    const contacts = data.results?.map(r => r.person) || data.connections || [];
     if (!contacts.length) return { content: [{ type: "text", text: "No contacts found." }] };
-    const lines = contacts.map((c: any) => {
-      const name = c.names?.[0]?.displayName || "Unknown";
-      const email = c.emailAddresses?.[0]?.value || "";
-      const phone = c.phoneNumbers?.[0]?.value || "";
-      const rn = c.resourceName || "";
+    const lines = contacts.map(c => {
+      const name = c?.names?.[0]?.displayName || "Unknown";
+      const email = c?.emailAddresses?.[0]?.value || "";
+      const phone = c?.phoneNumbers?.[0]?.value || "";
+      const rn = c?.resourceName || "";
       return `- ${name}${email ? " | " + email : ""}${phone ? " | " + phone : ""} | ${rn}`;
     });
     return { content: [{ type: "text", text: `Contacts (${contacts.length}):\n${lines.join("\n")}` }] };
@@ -43,10 +46,10 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ query, page_size = 10 }) => {
     const { accessToken } = await getCreds();
     const url = `${PEOPLE_BASE}/people:searchContacts?query=${encodeURIComponent(query)}&readMask=${FIELDS}&pageSize=${page_size}`;
-    const data = await googleFetch(url, accessToken) as any;
-    const contacts = (data.results || []).map((r: any) => r.person);
+    const data = await googleFetch(url, accessToken) as SearchContactsResponse;
+    const contacts = (data.results || []).map(r => r.person);
     if (!contacts.length) return { content: [{ type: "text", text: `No contacts found for: "${query}"` }] };
-    const lines = contacts.map((c: any) => formatContact(c));
+    const lines = contacts.map(c => formatContact(c));
     return { content: [{ type: "text", text: lines.join("\n\n---\n\n") }] };
   }));
 
@@ -54,7 +57,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     resource_name: z.string().describe("Contact resource name, e.g. 'people/c123456'"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ resource_name }) => {
     const { accessToken } = await getCreds();
-    const contact = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as any;
+    const contact = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as Person;
     return { content: [{ type: "text", text: formatContact(contact) }] };
   }));
 
@@ -73,7 +76,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     if (phone) body.phoneNumbers = [{ value: phone }];
     if (company || job_title) body.organizations = [{ name: company || "", title: job_title || "" }];
     if (notes) body.biographies = [{ value: notes }];
-    const result = await googleFetch(`${PEOPLE_BASE}/people:createContact`, accessToken, "POST", body) as any;
+    const result = await googleFetch(`${PEOPLE_BASE}/people:createContact`, accessToken, "POST", body) as Person;
     return { content: [{ type: "text", text: `Contact created: "${result.names?.[0]?.displayName}"\nResource: ${result.resourceName}` }] };
   }));
 
@@ -88,7 +91,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     notes: z.string().optional(),
   }, withErrorHandler(async ({ resource_name, first_name, last_name, email, phone, company, job_title, notes }) => {
     const { accessToken } = await getCreds();
-    const existing = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as any;
+    const existing = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as Person;
     const body: Record<string, unknown> = { etag: existing.etag };
     const updateFields: string[] = [];
     if (first_name !== undefined || last_name !== undefined) {
@@ -100,7 +103,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     if (phone !== undefined) { body.phoneNumbers = [{ value: phone }]; updateFields.push("phoneNumbers"); }
     if (company !== undefined || job_title !== undefined) { body.organizations = [{ name: company || "", title: job_title || "" }]; updateFields.push("organizations"); }
     if (notes !== undefined) { body.biographies = [{ value: notes }]; updateFields.push("biographies"); }
-    const result = await googleFetch(`${PEOPLE_BASE}/${resource_name}:updateContact?updatePersonFields=${updateFields.join(",")}`, accessToken, "PATCH", body) as any;
+    const result = await googleFetch(`${PEOPLE_BASE}/${resource_name}:updateContact?updatePersonFields=${updateFields.join(",")}`, accessToken, "PATCH", body) as Person;
     return { content: [{ type: "text", text: `Contact updated: "${result.names?.[0]?.displayName}"` }] };
   }));
 
@@ -114,8 +117,8 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_contact_groups", "List Google Contact groups/labels.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${PEOPLE_BASE}/contactGroups?pageSize=50`, accessToken) as any;
-    const groups = (data.contactGroups || []).map((g: any) => `- ${g.name} (${g.groupType}) | ID: ${g.resourceName} | Members: ${g.memberCount || 0}`);
+    const data = await googleFetch(`${PEOPLE_BASE}/contactGroups?pageSize=50`, accessToken) as ContactGroupListResponse;
+    const groups = (data.contactGroups || []).map(g => `- ${g.name} (${g.groupType}) | ID: ${g.resourceName} | Members: ${g.memberCount || 0}`);
     return { content: [{ type: "text", text: `Contact Groups:\n${groups.join("\n")}` }] };
   }));
 
@@ -124,7 +127,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     max_members: z.number().optional().default(50),
   }, { readOnlyHint: true }, withErrorHandler(async ({ resource_name, max_members = 50 }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`${PEOPLE_BASE}/${resource_name}?maxMembers=${max_members}`, accessToken) as any;
+    const data = await googleFetch(`${PEOPLE_BASE}/${resource_name}?maxMembers=${max_members}`, accessToken) as ContactGroup;
     const lines = [`Group: ${data.name}`, `Type: ${data.groupType}`, `Members: ${data.memberCount || 0}`, `Resource: ${data.resourceName}`];
     if (data.memberResourceNames?.length) lines.push(`\nMember resources:\n${data.memberResourceNames.join("\n")}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -134,7 +137,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     name: z.string(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ name }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch(`${PEOPLE_BASE}/contactGroups`, accessToken, "POST", { contactGroup: { name } }) as any;
+    const result = await googleFetch(`${PEOPLE_BASE}/contactGroups`, accessToken, "POST", { contactGroup: { name } }) as ContactGroup;
     return { content: [{ type: "text", text: `Group created: "${result.name}" (${result.resourceName})` }] };
   }));
 
@@ -160,13 +163,14 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
   }));
 }
 
-function formatContact(c: any): string {
+function formatContact(c: Person | undefined): string {
+  if (!c) return "Unknown contact";
   const lines = [
     `Name: ${c.names?.[0]?.displayName || "Unknown"}`,
     `Resource: ${c.resourceName}`,
   ];
-  if (c.emailAddresses?.length) lines.push(`Emails: ${c.emailAddresses.map((e: any) => e.value).join(", ")}`);
-  if (c.phoneNumbers?.length) lines.push(`Phones: ${c.phoneNumbers.map((p: any) => p.value).join(", ")}`);
+  if (c.emailAddresses?.length) lines.push(`Emails: ${c.emailAddresses.map(e => e.value).join(", ")}`);
+  if (c.phoneNumbers?.length) lines.push(`Phones: ${c.phoneNumbers.map(p => p.value).join(", ")}`);
   if (c.organizations?.length) {
     const org = c.organizations[0];
     if (org.name) lines.push(`Company: ${org.name}${org.title ? " / " + org.title : ""}`);
@@ -201,15 +205,15 @@ function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
         if (c.company) person.organizations = [{ name: c.company }];
         return person;
       });
-      const data = await googleFetch(`${PEOPLE_BASE}/people:batchCreateContacts`, accessToken, "POST", { contacts: contacts_body.map(p => ({ contactPerson: p })), readMask: "names" }) as any;
+      const data = await googleFetch(`${PEOPLE_BASE}/people:batchCreateContacts`, accessToken, "POST", { contacts: contacts_body.map(p => ({ contactPerson: p })), readMask: "names" }) as BatchCreateContactsResponse;
       const created = data.createdPeople || [];
       results.push(`Created ${created.length} contacts`);
-      created.forEach((p: any) => results.push(`  + ${p.person?.names?.[0]?.displayName} (${p.person?.resourceName})`));
+      created.forEach(p => results.push(`  + ${p.person?.names?.[0]?.displayName} (${p.person?.resourceName})`));
     } else if (action === "update") {
       for (const c of contacts.slice(0, 50)) {
         if (!c.resource_name) { results.push(`  ✗ Missing resource_name`); continue; }
         try {
-          const existing = await googleFetch(`${PEOPLE_BASE}/${c.resource_name}?personFields=names,emailAddresses,phoneNumbers,organizations`, accessToken) as any;
+          const existing = await googleFetch(`${PEOPLE_BASE}/${c.resource_name}?personFields=names,emailAddresses,phoneNumbers,organizations`, accessToken) as Person;
           const body: Record<string, unknown> = { etag: existing.etag };
           const fields: string[] = [];
           if (c.first_name !== undefined || c.last_name !== undefined) {
@@ -217,9 +221,9 @@ function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
             body.names = [{ ...n, givenName: c.first_name ?? n.givenName, familyName: c.last_name ?? n.familyName }];
             fields.push("names");
           }
-          if (c.email) { body.emailAddresses = [{ value: c.email }]; fields.push("emailAddresses"); }
-          if (c.phone) { body.phoneNumbers = [{ value: c.phone }]; fields.push("phoneNumbers"); }
-          if (c.company) { body.organizations = [{ name: c.company }]; fields.push("organizations"); }
+          if (c.email !== undefined) { body.emailAddresses = [{ value: c.email }]; fields.push("emailAddresses"); }
+          if (c.phone !== undefined) { body.phoneNumbers = [{ value: c.phone }]; fields.push("phoneNumbers"); }
+          if (c.company !== undefined) { body.organizations = [{ name: c.company }]; fields.push("organizations"); }
           await googleFetch(`${PEOPLE_BASE}/${c.resource_name}:updateContact?updatePersonFields=${fields.join(",")}`, accessToken, "PATCH", body);
           results.push(`  ✓ Updated ${c.resource_name}`);
         } catch (e) { results.push(`  ✗ ${c.resource_name}: ${e}`); }
@@ -255,21 +259,21 @@ function _registerContactGroupsConsolidated(server: McpServer, getCreds: GetCred
         const base = "https://people.googleapis.com/v1/contactGroups";
   
         if (action === "list") {
-          const data = await googleFetch(`${base}?pageSize=50&groupFields=name,memberCount,groupType`, accessToken) as any;
+          const data = await googleFetch(`${base}?pageSize=50&groupFields=name,memberCount,groupType`, accessToken) as ContactGroupListResponse;
           const groups = data.contactGroups || [];
-          const lines = groups.map((g: any) => `${g.resourceName} | ${g.name} | Members: ${g.memberCount ?? "?"} | Type: ${g.groupType}`);
+          const lines = groups.map(g => `${g.resourceName} | ${g.name} | Members: ${g.memberCount ?? "?"} | Type: ${g.groupType}`);
           return { content: [{ type: "text", text: lines.join("\n") || "No groups." }] };
         }
-  
+
         if (action === "create") {
           if (!name) throw new Error("name required");
-          const res = await googleFetch(base, accessToken, "POST", { contactGroup: { name } }) as any;
+          const res = await googleFetch(base, accessToken, "POST", { contactGroup: { name } }) as ContactGroup;
           return { content: [{ type: "text", text: `Group created: "${res.name}" | ${res.resourceName}` }] };
         }
-  
+
         if (action === "get") {
           if (!group_resource_name) throw new Error("group_resource_name required");
-          const res = await googleFetch(`${base}/${group_resource_name.replace("contactGroups/","")}?maxMembers=${max_members}`, accessToken) as any;
+          const res = await googleFetch(`${base}/${group_resource_name.replace("contactGroups/","")}?maxMembers=${max_members}`, accessToken) as ContactGroup;
           const members = (res.memberResourceNames || []).join(", ");
           return { content: [{ type: "text", text: `${res.name} (${res.resourceName})\nMembers (${res.memberCount ?? 0}): ${members || "(none)"}` }] };
         }

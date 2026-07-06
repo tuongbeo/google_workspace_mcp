@@ -74,7 +74,7 @@ async function pass2DataWrite(
   colConfigs: Record<number, ColumnConfig>,
   position: "replace" | "append",
 ): Promise<void> {
-  const { headers, rows, columns } = parsed;
+  const { headers, rows, columns, isVi } = parsed;
   const numCols = headers.length;
   const numRows = rows.length;
 
@@ -118,7 +118,7 @@ async function pass2DataWrite(
   for (const col of columns) {
     const cfg = colConfigs[col.index];
     const type = cfg?.type ?? col.type;
-    const fmt = buildNumberFormat(type, cfg?.format);
+    const fmt = buildNumberFormat(type, cfg?.format, isVi);
     if (fmt && numRows > 0) {
       fmtReqs.push({
         repeatCell: {

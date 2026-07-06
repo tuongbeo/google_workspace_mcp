@@ -8,17 +8,20 @@ import { googleFetch, slidesRequest } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import { THEMES, FONT_PAIRS, deriveSlideTokens } from "../styles";
 import type { GetCredsFunc } from "../types";
+import type {
+  SlidesPresentation, SlidesBatchUpdateResponse, SlidesSlide, SlidesThumbnail,
+} from "./google-api-types";
 
 function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_presentation", "Get details and slide content of a Google Slides presentation.", {
     presentation_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ presentation_id }) => {
     const { accessToken } = await getCreds();
-    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as any;
+    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as SlidesPresentation;
     const lines = [`# ${data.title}`, `ID: ${presentation_id}`, `Slides: ${data.slides?.length || 0}`, ""];
     for (const slide of (data.slides || [])) {
       const idx = slide.slideNumber || "?";
-      const texts = (slide.pageElements || []).flatMap((el: any) => el.shape?.text?.textElements || []).map((te: any) => te.textRun?.content || "").join("").trim();
+      const texts = (slide.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
       if (texts) lines.push(`[Slide ${idx}] ${texts.substring(0, 200)}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -28,7 +31,7 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
     title: z.string(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ title }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as any;
+    const result = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as SlidesPresentation;
     return { content: [{ type: "text", text: `Presentation created: "${result.title}"\nID: ${result.presentationId}\nURL: https://docs.google.com/presentation/d/${result.presentationId}/edit` }] };
   }));
 
@@ -40,7 +43,7 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: false }, withErrorHandler(async ({ presentation_id, layout = "BLANK", title, body_text }) => {
     const { accessToken } = await getCreds();
     const insertReq = { createSlide: { slideLayoutReference: { predefinedLayout: layout } } };
-    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests: [insertReq] }) as any;
+    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests: [insertReq] }) as SlidesBatchUpdateResponse;
     const newSlideId = result.replies?.[0]?.createSlide?.objectId;
     if ((title || body_text) && newSlideId) {
       const textReqs: any[] = [];
@@ -62,7 +65,7 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
     requests: z.array(z.record(z.any())),
   }, { readOnlyHint: false }, withErrorHandler(async ({ presentation_id, requests }) => {
     const { accessToken } = await getCreds();
-    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests }) as any;
+    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests }) as SlidesBatchUpdateResponse;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations.` }] };
   }));
 
@@ -174,8 +177,8 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
       if (presentation_id) {
         presId = presentation_id;
       } else {
-        const pres = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as any;
-        presId = pres.presentationId;
+        const pres = await googleFetch("https://slides.googleapis.com/v1/presentations", accessToken, "POST", { title }) as SlidesPresentation;
+        presId = pres.presentationId!;
         // Delete default blank slide when creating fresh
         const defSlide = pres.slides?.[0]?.objectId;
         if (defSlide) {
@@ -356,12 +359,16 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     insertion_index: z.number().optional().describe("0-based index where the duplicate is inserted. Omit to insert after original."),
   }, { readOnlyHint: false }, withErrorHandler(async ({ presentation_id, slide_object_id, insertion_index }) => {
     const { accessToken } = await getCreds();
-    const req: any = { duplicateObject: { objectId: slide_object_id } };
-    if (insertion_index !== undefined) {
-      req.duplicateObject.objectIds = { [slide_object_id]: `${slide_object_id}_copy_${Date.now()}` };
-    }
-    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests: [req] }) as any;
+    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
+      requests: [{ duplicateObject: { objectId: slide_object_id } }],
+    }) as SlidesBatchUpdateResponse;
     const newId = result.replies?.[0]?.duplicateObject?.objectId;
+    // duplicateObject doesn't support positioning — move the duplicate afterward.
+    if (insertion_index !== undefined && newId) {
+      await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
+        requests: [{ updateSlidesPosition: { slideObjectIds: [newId], insertionIndex: insertion_index } }],
+      });
+    }
     return { content: [{ type: "text", text: `Slide duplicated.\nOriginal ID: ${slide_object_id}\nNew slide ID: ${newId || "unknown"}` }] };
   }));
 
@@ -397,11 +404,11 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     slide_object_id: z.string().describe("Slide object ID (from get_presentation)"),
   }, withErrorHandler(async ({ presentation_id, slide_object_id }) => {
     const { accessToken } = await getCreds();
-    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as any;
-    const slide = (data.slides || []).find((s: any) => s.objectId === slide_object_id);
+    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as SlidesPresentation;
+    const slide = (data.slides || []).find(s => s.objectId === slide_object_id);
     if (!slide) return { content: [{ type: "text", text: `Slide not found: ${slide_object_id}` }] };
     const notes = slide.slideProperties?.notesPage;
-    const notesTexts = (notes?.pageElements || []).flatMap((el: any) => el.shape?.text?.textElements || []).map((te: any) => te.textRun?.content || "").join("").trim();
+    const notesTexts = (notes?.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
     return { content: [{ type: "text", text: notesTexts ? `Speaker notes:\n${notesTexts}` : "No speaker notes on this slide." }] };
   }));
 
@@ -411,11 +418,11 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     notes_text: z.string().describe("Text content for speaker notes"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ presentation_id, slide_object_id, notes_text }) => {
     const { accessToken } = await getCreds();
-    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as any;
-    const slide = (data.slides || []).find((s: any) => s.objectId === slide_object_id);
+    const data = await slidesRequest(accessToken, presentation_id, "", "GET") as SlidesPresentation;
+    const slide = (data.slides || []).find(s => s.objectId === slide_object_id);
     if (!slide) return { content: [{ type: "text", text: `Slide not found: ${slide_object_id}` }] };
     const notesPage = slide.slideProperties?.notesPage;
-    const notesShapeId = (notesPage?.pageElements || []).find((el: any) => el.shape?.placeholder?.type === "BODY")?.objectId;
+    const notesShapeId = (notesPage?.pageElements || []).find(el => el.shape?.placeholder?.type === "BODY")?.objectId;
     if (!notesShapeId) return { content: [{ type: "text", text: `No notes shape found on slide ${slide_object_id}` }] };
     await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [
@@ -494,7 +501,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const req: any = { replaceAllText: { containsText: { text: find_text, matchCase: match_case }, replaceText: replace_text } };
     if (page_object_ids?.length) req.replaceAllText.pageObjectIds = page_object_ids;
-    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests: [req] }) as any;
+    const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", { requests: [req] }) as SlidesBatchUpdateResponse;
     const count = result.replies?.[0]?.replaceAllText?.occurrencesChanged || 0;
     return { content: [{ type: "text", text: `Text replaced!\n"${find_text}" → "${replace_text}"\nOccurrences changed: ${count}` }] };
   }));
@@ -562,7 +569,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     const imageId = object_id || `image_${Date.now()}`;
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [{ createImage: { objectId: imageId, url: image_url, elementProperties: { pageObjectId: slide_object_id, size: { height: { magnitude: height, unit: "EMU" }, width: { magnitude: width, unit: "EMU" } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: "EMU" } } } }],
-    }) as any;
+    }) as SlidesBatchUpdateResponse;
     const newId = result.replies?.[0]?.createImage?.objectId || imageId;
     return { content: [{ type: "text", text: `Image inserted.\nImage ID: ${newId}\nURL: ${image_url}` }] };
   }));
@@ -576,7 +583,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [{ replaceAllShapesWithImage: { imageUrl: image_url, imageReplaceMethod: image_replace_method, containsText: { text: contains_text, matchCase: false } } }],
-    }) as any;
+    }) as SlidesBatchUpdateResponse;
     const count = result.replies?.[0]?.replaceAllShapesWithImage?.occurrencesChanged || 0;
     return { content: [{ type: "text", text: `Shapes replaced with image!\nMatched text: "${contains_text}"\nOccurrences changed: ${count}` }] };
   }));
@@ -596,7 +603,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     const tableId = object_id || `table_${Date.now()}`;
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [{ createTable: { objectId: tableId, elementProperties: { pageObjectId: slide_object_id, size: { height: { magnitude: height, unit: "EMU" }, width: { magnitude: width, unit: "EMU" } }, transform: { scaleX: 1, scaleY: 1, translateX: x, translateY: y, unit: "EMU" } }, rows, columns } }],
-    }) as any;
+    }) as SlidesBatchUpdateResponse;
     const newId = result.replies?.[0]?.createTable?.objectId || tableId;
     return { content: [{ type: "text", text: `Table created.\nTable ID: ${newId}\nSize: ${rows} rows × ${columns} columns` }] };
   }));
@@ -994,8 +1001,8 @@ function _registerSlidesPage(server: McpServer, getCreds: GetCredsFunc) {
     page_object_id: z.string().describe("Page/slide object ID (from get_presentation)"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ presentation_id, page_object_id }) => {
     const { accessToken } = await getCreds();
-    const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}`, "GET") as any;
-    const texts = (data.pageElements || []).flatMap((el: any) => el.shape?.text?.textElements || []).map((te: any) => te.textRun?.content || "").join("").trim();
+    const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}`, "GET") as SlidesSlide;
+    const texts = (data.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
     const lines = [`Page: ${page_object_id}`, `Type: ${data.pageType || "SLIDE"}`, `Elements: ${data.pageElements?.length || 0}`, "", "Content:", texts || "(no text)"];
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));
@@ -1007,7 +1014,7 @@ function _registerSlidesPage(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ presentation_id, page_object_id, thumbnail_size = "MEDIUM" }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ "thumbnailProperties.thumbnailSize": thumbnail_size });
-    const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}/thumbnail?${params}`, "GET") as any;
+    const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}/thumbnail?${params}`, "GET") as SlidesThumbnail;
     return { content: [{ type: "text", text: `Thumbnail URL (${thumbnail_size}):\n${data.contentUrl}\n\nDimensions: ${data.width}×${data.height}` }] };
   }));
 }

@@ -7,13 +7,16 @@ import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  Form, FormBatchUpdateResponse, FormResponse, FormResponseListResponse,
+} from "./google-api-types";
 
 function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_form", "Get details, structure, settings, and linked spreadsheet of a Google Form.", {
     form_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ form_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}`, accessToken) as any;
+    const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}`, accessToken) as Form;
     const settings = data.settings || {};
     const lines = [
       `Form: ${data.info?.title}`,
@@ -50,7 +53,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
           const required = q.required ? "*" : "";
           lines.push(`  - [${type}${required}] ${item.title || "Untitled"} (ID: ${item.itemId})`);
           if (q.choiceQuestion?.options) {
-            lines.push(`    Options: ${q.choiceQuestion.options.map((o: any) => o.value).join(", ")}`);
+            lines.push(`    Options: ${q.choiceQuestion.options.map(o => o.value).join(", ")}`);
           }
           if (q.scaleQuestion) {
             lines.push(`    Scale: ${q.scaleQuestion.low} (${q.scaleQuestion.lowLabel || ""}) → ${q.scaleQuestion.high} (${q.scaleQuestion.highLabel || ""})`);
@@ -76,7 +79,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const info: Record<string, string> = { title };
     if (description) info.description = description;
-    const result = await googleFetch("https://forms.googleapis.com/v1/forms", accessToken, "POST", { info }) as any;
+    const result = await googleFetch("https://forms.googleapis.com/v1/forms", accessToken, "POST", { info }) as Form;
     return { content: [{ type: "text", text: `Form created: "${result.info?.title}"\nID: ${result.formId}\nEdit: https://docs.google.com/forms/d/${result.formId}/edit\nRespond: ${result.responderUri}` }] };
   }));
 
@@ -85,7 +88,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
     requests: z.array(z.record(z.any())).describe("Array of Forms API batchUpdate request objects"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ form_id, requests }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}:batchUpdate`, accessToken, "POST", { requests }) as any;
+    const result = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}:batchUpdate`, accessToken, "POST", { requests }) as FormBatchUpdateResponse;
     return { content: [{ type: "text", text: `Batch update applied. ${result.replies?.length || 0} operations.` }] };
   }));
 
@@ -94,7 +97,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
     page_size: z.number().optional().default(10),
   }, withErrorHandler(async ({ form_id, page_size = 10 }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses?pageSize=${page_size}`, accessToken) as any;
+    const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses?pageSize=${page_size}`, accessToken) as FormResponseListResponse;
     const responses = data.responses || [];
     if (!responses.length) return { content: [{ type: "text", text: "No responses yet." }] };
     const lines = [`${responses.length} response(s):`, ""];
@@ -109,10 +112,10 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
     response_id: z.string(),
   }, withErrorHandler(async ({ form_id, response_id }) => {
     const { accessToken } = await getCreds();
-    const r = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses/${response_id}`, accessToken) as any;
+    const r = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses/${response_id}`, accessToken) as FormResponse;
     const lines = [`Response ID: ${r.responseId}`, `Submitted: ${r.createTime}`, ""];
     for (const [questionId, answer] of Object.entries(r.answers || {})) {
-      const textAnswers = (answer as any).textAnswers?.answers?.map((a: any) => a.value).join(", ");
+      const textAnswers = answer.textAnswers?.answers?.map(a => a.value).join(", ");
       lines.push(`Q ${questionId}: ${textAnswers || JSON.stringify(answer)}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -133,10 +136,11 @@ function _registerFormSettings(server: McpServer, getCreds: GetCredsFunc) {
     const fields: string[] = [];
     if (collect_email !== undefined) { settings.emailCollectionType = collect_email ? "VERIFIED" : "DO_NOT_COLLECT"; fields.push("emailCollectionType"); }
     if (limit_responses !== undefined) { settings.limitOneResponsePerUser = limit_responses; fields.push("limitOneResponsePerUser"); }
-    if (show_progress_bar !== undefined) { settings.progressBar = { show_progress_bar }; fields.push("progressBar"); }
+    if (show_progress_bar !== undefined) { settings.progressBar = show_progress_bar; fields.push("progressBar"); }
     if (shuffle_questions !== undefined) { settings.shuffleQuestions = shuffle_questions; fields.push("shuffleQuestions"); }
-    const requests: any[] = [{ updateSettings: { settings: { quizSettings: is_quiz !== undefined ? { isQuiz: is_quiz } : undefined, ...settings }, updateMask: fields.join(",") } }];
-    await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}:batchUpdate`, accessToken, "POST", { requests }) as any;
+    if (is_quiz !== undefined) { settings.quizSettings = { isQuiz: is_quiz }; fields.push("quizSettings.isQuiz"); }
+    const requests: any[] = [{ updateSettings: { settings, updateMask: fields.join(",") } }];
+    await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}:batchUpdate`, accessToken, "POST", { requests });
     return { content: [{ type: "text", text: `Form publish settings updated.\nApplied: ${fields.join(", ") || "quiz mode"}` }] };
   }));
 }
