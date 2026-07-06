@@ -21,7 +21,6 @@ import { registerDriveTools }      from "../../tools/drive";
 import { registerFormsTools }      from "../../tools/forms";
 import { registerAppsScriptTools } from "../../tools/appsscript";
 import { registerTasksTools }      from "../../tools/tasks";
-import { registerCompositeTools }  from "../../tools/composite";
 
 // ── Tools excluded from Office Worker (lean set) ──────────────────────────────
 //
@@ -143,9 +142,11 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
   } as any);
 
   async init() {
-    const sub      = this.props.google_sub;
-    const getCreds = makeGetCreds(sub, this.env, "office");
-    const preset   = (this.env as any).TOOLS_PRESET ?? "all";
+    if (!this.props) throw new Error("OfficeAgent.init() called before OAuth props were set");
+    const sub       = this.props.google_sub;
+    const namespace = this.env.TOKEN_NAMESPACE ?? "office";
+    const getCreds  = makeGetCreds(sub, this.env, namespace);
+    const preset    = this.env.TOOLS_PRESET ?? "all";
     const load     = (name: string) => preset === "all" || preset === name;
 
     console.log(`[office-agent] init for sub=${sub}, preset=${preset}`);
@@ -164,6 +165,5 @@ export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps
       registerAppsScriptTools(withSkip(this.server, SKIP_APPSSCRIPT), getCreds);
     if (load("tasks"))
       registerTasksTools(this.server, getCreds);
-    registerCompositeTools(this.server, getCreds);
   }
 }

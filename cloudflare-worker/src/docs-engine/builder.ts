@@ -131,6 +131,53 @@ function buildListText(items: ListItem[]): string {
   ).join("");
 }
 
+/**
+ * Apply per-item paragraph/text styling for a list, recursing into subItems
+ * in the same order buildListText() wrote their text — parent text, then
+ * its subItems' text, then the next sibling. Returns the cursor position
+ * just past the last item processed (including all of its subItems), so a
+ * caller iterating sibling items keeps its own cursor in sync.
+ */
+function applyListItemStyles(
+  items: ListItem[],
+  cursor: number,
+  depth: number,
+  listType: "bullet" | "numbered" | "checkbox",
+  tabId: string | undefined,
+  pass1Requests: object[],
+): number {
+  for (const item of items) {
+    const itemText = inlinesToText(item.children);
+    const itemLen = itemText.length;
+    const itemParaEnd = cursor + itemLen;
+    if (itemParaEnd > cursor) {
+      if (depth > 0) {
+        pass1Requests.push(paraStyleReq(cursor, itemParaEnd, tabId, {
+          namedStyleType: "NORMAL_TEXT",
+          indentFirstLine: { magnitude: 18 * depth, unit: "PT" },
+          indentStart:     { magnitude: 18 * depth, unit: "PT" },
+        }, "namedStyleType,indentFirstLine,indentStart"));
+      } else {
+        pass1Requests.push(paraStyleReq(cursor, itemParaEnd, tabId,
+          { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
+      }
+    }
+    applyInlineStyles(item.children, cursor, tabId, pass1Requests);
+    // Checked item → strikethrough + muted
+    if (listType === "checkbox" && item.checked === true && itemParaEnd > cursor) {
+      pass1Requests.push(textStyleReq(cursor, itemParaEnd, tabId, {
+        strikethrough: true,
+        foregroundColor: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
+      }));
+    }
+    cursor = itemParaEnd + 1; // +1 for \n
+    if (item.subItems?.length) {
+      cursor = applyListItemStyles(item.subItems, cursor, depth + 1, listType, tabId, pass1Requests);
+    }
+  }
+  return cursor;
+}
+
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 export function buildExecutionPlan(
@@ -293,26 +340,12 @@ export function buildExecutionPlan(
         if (tabId) range.tabId = tabId;
         pass1Requests.push({ createParagraphBullets: { range, bulletPreset } });
 
-        // Reset each list item to NORMAL_TEXT
-        let itemCursor = startIdx;
-        for (const item of node.items) {
-          const itemText = inlinesToText(item.children);
-          const itemLen = itemText.length;
-          const itemParaEnd = itemCursor + itemLen;
-          if (itemParaEnd > itemCursor) {
-            pass1Requests.push(paraStyleReq(itemCursor, itemParaEnd, tabId,
-              { namedStyleType: "NORMAL_TEXT" }, "namedStyleType"));
-          }
-          applyInlineStyles(item.children, itemCursor, tabId, pass1Requests);
-          // Checked item → strikethrough + muted
-          if (node.listType === "checkbox" && item.checked === true && itemParaEnd > itemCursor) {
-            pass1Requests.push(textStyleReq(itemCursor, itemParaEnd, tabId, {
-              strikethrough: true,
-              foregroundColor: { color: { rgbColor: { red: 0.6, green: 0.6, blue: 0.6 } } },
-            }));
-          }
-          itemCursor += itemLen + 1; // +1 for \n
-        }
+        // Reset each list item (recursively, including nested subItems) to
+        // NORMAL_TEXT. Must recurse in lockstep with buildListText() above,
+        // which already wove subItems' text in right after their parent —
+        // a flat loop over top-level items only would drift out of sync with
+        // the actual inserted text as soon as any item had subItems.
+        applyListItemStyles(node.items, startIdx, 0, node.listType, tabId, pass1Requests);
         break;
       }
 

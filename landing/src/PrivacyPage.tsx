@@ -93,7 +93,7 @@ export default function PrivacyPage() {
         <h2>10. Contact</h2>
         <p>
           For questions about this Privacy Policy or to request data deletion, contact us at:{' '}
-          <a href="mailto:tuongpm@pila.vn">tuongpm@pila.vn</a>
+          <a href="mailto:manhtuongdz@gmail.com">manhtuongdz@gmail.com</a>
         </p>
 
         <p style={{ marginTop: 32, fontSize: 13, color: 'var(--text-muted)' }}>

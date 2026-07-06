@@ -134,9 +134,10 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
     // Complete OAuth: OAuthProvider issues MCP session token to Claude.ai
     const props: OAuthProps = { google_sub: sub, email };
     const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-      request: oauthReqInfo,
-      userId:  sub,
-      scope:   oauthReqInfo.scope,
+      request:  oauthReqInfo,
+      userId:   sub,
+      scope:    oauthReqInfo.scope,
+      metadata: {},
       props,
     });
 

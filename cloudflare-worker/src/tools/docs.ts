@@ -1170,6 +1170,7 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
       let docTitle: string;
       let docUrl: string;
       let applyTheme = true;
+      let appendStartIndex = 1;
 
       if (!document_id) {
         // CREATE MODE
@@ -1233,7 +1234,8 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
           applyTheme = !!theme; // only apply if explicitly passed
         }
 
-        // Get start index for append
+        // Get start index for append: insert right before the document's
+        // mandatory trailing newline, so new content lands after existing content.
         if (position === "append") {
           const path2 = activeTabId ? "?includeTabsContent=true" : "";
           const doc2 = await docsRequest(accessToken, docId, path2) as any;
@@ -1243,7 +1245,9 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
           } else {
             bodyContent2 = doc2.body?.content ?? [];
           }
-          // startIndex will be end of current content
+          const lastElem2 = bodyContent2.slice(-1)[0];
+          const endIndex2 = lastElem2?.endIndex ?? 2;
+          appendStartIndex = Math.max(1, endIndex2 - 1);
         }
       }
 
@@ -1253,7 +1257,7 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
       const plan = buildExecutionPlan(ast, {
         theme,
         fontPair: font_pair,
-        startIndex: 1,
+        startIndex: position === "append" ? appendStartIndex : 1,
         tabId: activeTabId,
         alignment,
       });

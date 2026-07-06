@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Env } from "../types";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type { CustomSearchResponse, CustomSearchEngineInfo } from "./google-api-types";
 
 
 export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, env: Env) {
@@ -33,14 +34,14 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     if (sort) params.set("sort", sort);
     const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
     if (!resp.ok) throw new Error(`Search failed: ${await resp.text()}`);
-    const data = await resp.json() as any;
+    const data = await resp.json() as CustomSearchResponse;
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: `No results for: "${query}"` }] };
     const totalResults = data.searchInformation?.totalResults || "?";
     const lines = [`Search: "${query}" — ${totalResults} total results`, ""];
     for (const item of items) {
       lines.push(`**${item.title}**`);
-      lines.push(item.link);
+      if (item.link) lines.push(item.link);
       if (item.snippet) lines.push(item.snippet);
       lines.push("");
     }
@@ -64,7 +65,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     });
     const resp = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
     if (!resp.ok) throw new Error(`Search failed: ${await resp.text()}`);
-    const data = await resp.json() as any;
+    const data = await resp.json() as CustomSearchResponse;
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: `No results for "${query}" on ${site_search}` }] };
     const lines = [`Search "${query}" on ${site_search}:`, ""];
@@ -81,7 +82,7 @@ export function registerSearchTools(server: McpServer, _getCreds: GetCredsFunc, 
     }
     const resp = await fetch(`https://www.googleapis.com/customsearch/v1/cse?key=${env.GOOGLE_PSE_API_KEY}&cx=${env.GOOGLE_PSE_ENGINE_ID}`);
     if (!resp.ok) throw new Error(`API error: ${await resp.text()}`);
-    const data = await resp.json() as any;
+    const data = await resp.json() as CustomSearchEngineInfo;
     return { content: [{ type: "text", text: `Search Engine: ${data.title || "N/A"}\nCX: ${env.GOOGLE_PSE_ENGINE_ID}\nKind: ${data.kind || "N/A"}` }] };
   }));
 }

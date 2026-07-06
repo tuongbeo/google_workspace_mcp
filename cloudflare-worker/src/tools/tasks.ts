@@ -7,12 +7,13 @@ import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type { GTaskList, GTaskListsResponse, GTask, GTaskListResponse } from "./google-api-types";
 
 function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("list_task_lists", "List all Google Task lists.", {}, { readOnlyHint: true }, withErrorHandler(async () => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch("https://tasks.googleapis.com/tasks/v1/users/@me/lists", accessToken) as any;
-    const lists = (data.items || []).map((l: any) => `- ${l.title} (ID: ${l.id})`);
+    const data = await googleFetch("https://tasks.googleapis.com/tasks/v1/users/@me/lists", accessToken) as GTaskListsResponse;
+    const lists = (data.items || []).map(l => `- ${l.title} (ID: ${l.id})`);
     return { content: [{ type: "text", text: `Task Lists:\n${lists.join("\n")}` }] };
   }));
 
@@ -20,7 +21,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     title: z.string(),
   }, withErrorHandler(async ({ title }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch("https://tasks.googleapis.com/tasks/v1/users/@me/lists", accessToken, "POST", { title }) as any;
+    const result = await googleFetch("https://tasks.googleapis.com/tasks/v1/users/@me/lists", accessToken, "POST", { title }) as GTaskList;
     return { content: [{ type: "text", text: `Task list created: "${result.title}" (ID: ${result.id})` }] };
   }));
 
@@ -39,10 +40,10 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id = "@default", show_completed = false, show_hidden = false }) => {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ showCompleted: String(show_completed), showHidden: String(show_hidden), maxResults: "100" });
-    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks?${params}`, accessToken) as GTaskListResponse;
     const tasks = data.items || [];
     if (!tasks.length) return { content: [{ type: "text", text: "No tasks found." }] };
-    const lines = tasks.map((t: any) => {
+    const lines = tasks.map(t => {
       const status = t.status === "completed" ? "✓" : "○";
       const due = t.due ? ` (due: ${t.due.split("T")[0]})` : "";
       const notes = t.notes ? ` | ${t.notes.substring(0, 50)}` : "";
@@ -56,7 +57,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string().optional().default("@default"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ task_id, tasklist_id = "@default" }) => {
     const { accessToken } = await getCreds();
-    const t = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as any;
+    const t = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as GTask;
     return { content: [{ type: "text", text: [`Task: ${t.title}`, `Status: ${t.status}`, `Due: ${t.due?.split("T")[0] || "N/A"}`, `Notes: ${t.notes || "N/A"}`, `ID: ${t.id}`].join("\n") }] };
   }));
 
@@ -72,7 +73,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     if (notes) body.notes = notes;
     if (due) body.due = due;
     const params = parent ? `?parent=${parent}` : "";
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks${params}`, accessToken, "POST", body) as any;
+    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks${params}`, accessToken, "POST", body) as GTask;
     return { content: [{ type: "text", text: `Task created: "${result.title}" (ID: ${result.id})` }] };
   }));
 
@@ -85,13 +86,16 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     due: z.string().optional(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ task_id, tasklist_id = "@default", title, status, notes, due }) => {
     const { accessToken } = await getCreds();
-    const existing = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as any;
+    const existing = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as GTask;
     const body: Record<string, unknown> = { ...existing };
     if (title) body.title = title;
-    if (status) body.status = status;
+    if (status) {
+      body.status = status;
+      if (status === "needsAction") body.completed = null;
+    }
     if (notes !== undefined) body.notes = notes;
     if (due) body.due = due;
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken, "PUT", body) as any;
+    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken, "PUT", body) as GTask;
     return { content: [{ type: "text", text: `Task updated: "${result.title}" | Status: ${result.status}` }] };
   }));
 
@@ -114,7 +118,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     const params = new URLSearchParams();
     if (parent) params.set("parent", parent);
     if (previous) params.set("previous", previous);
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}/move?${params}`, accessToken, "POST") as any;
+    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}/move?${params}`, accessToken, "POST") as GTask;
     return { content: [{ type: "text", text: `Task moved. Position: ${result.position || "updated"}` }] };
   }));
 
@@ -132,7 +136,7 @@ function _registerTaskListExtra(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken) as any;
+    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken) as GTaskList;
     return { content: [{ type: "text", text: `Task List: ${data.title}\nID: ${data.id}\nUpdated: ${data.updated || "N/A"}` }] };
   }));
 }

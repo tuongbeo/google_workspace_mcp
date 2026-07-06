@@ -219,6 +219,55 @@ export function parseMarkdown(input: string): DocNode[] {
     return tokensToInlineWithMentions(toks, mentionMap);
   }
 
+  /**
+   * Parse a bullet_list_open/ordered_list_open token (at `tokens[start]`),
+   * recursing into nested lists so nested items are preserved as `subItems`
+   * instead of being dropped/misread as the parent item's own close token.
+   * Returns the index just past the matching list-close token.
+   */
+  function parseListTokens(start: number): { items: ListItem[]; isCheckbox: boolean; nextIndex: number } {
+    const closeType = tokens[start].type === "ordered_list_open" ? "ordered_list_close" : "bullet_list_close";
+    let i = start + 1;
+    const items: ListItem[] = [];
+    let isCheckbox = false;
+
+    while (i < tokens.length && tokens[i].type !== closeType) {
+      if (tokens[i].type !== "list_item_open") { i++; continue; }
+      i++;
+      let checked: boolean | undefined = undefined;
+      const itemInlines: InlineNode[] = [];
+      let subItems: ListItem[] | undefined;
+
+      while (i < tokens.length && tokens[i].type !== "list_item_close") {
+        const cur = tokens[i];
+        if (cur.type === "paragraph_open" || cur.type === "paragraph_close") { i++; continue; }
+        if (cur.type === "inline") {
+          let raw = cur.content;
+          // Detect checkbox: "[ ] text" or "[x] text"
+          const cbMatch = /^\[([ xX])\]\s*(.*)$/.exec(raw);
+          if (cbMatch) {
+            checked = cbMatch[1] !== " ";
+            isCheckbox = true;
+            raw = cbMatch[2];
+          }
+          itemInlines.push(...parseInline(raw));
+          i++;
+          continue;
+        }
+        if (cur.type === "bullet_list_open" || cur.type === "ordered_list_open") {
+          const nested = parseListTokens(i);
+          subItems = (subItems ?? []).concat(nested.items);
+          i = nested.nextIndex;
+          continue;
+        }
+        i++;
+      }
+      items.push({ children: itemInlines, checked, subItems });
+      i++; // skip list_item_close
+    }
+    return { items, isCheckbox, nextIndex: i + 1 }; // +1 to skip the list close token
+  }
+
   // Collect footnote defs — strip them from the processed content
   // [^id]: text at start of line (may be parsed as paragraphs — we intercept below)
   const footnoteDefs: Map<string, string> = new Map();
@@ -295,45 +344,10 @@ export function parseMarkdown(input: string): DocNode[] {
 
     // Bullet / ordered / task lists
     if (t.type === "bullet_list_open" || t.type === "ordered_list_open") {
-      const isOrdered = t.type === "ordered_list_open";
-      const closeType = isOrdered ? "ordered_list_close" : "bullet_list_close";
-      i++;
-      const items: ListItem[] = [];
-      let isCheckbox = false;
-
-      while (i < tokens.length && tokens[i].type !== closeType) {
-        if (tokens[i].type === "list_item_open") {
-          i++;
-          let checked: boolean | undefined = undefined;
-          const itemInlines: InlineNode[] = [];
-          const subItems: ListItem[] = [];
-
-          while (i < tokens.length && tokens[i].type !== "list_item_close") {
-            const cur = tokens[i];
-            if (cur.type === "paragraph_open" || cur.type === "paragraph_close") { i++; continue; }
-            if (cur.type === "inline") {
-              let raw = cur.content;
-              // Detect checkbox: "[ ] text" or "[x] text"
-              const cbMatch = /^\[([ xX])\]\s*(.*)$/.exec(raw);
-              if (cbMatch) {
-                checked = cbMatch[1] !== " ";
-                isCheckbox = true;
-                raw = cbMatch[2];
-              }
-              itemInlines.push(...parseInline(raw));
-            }
-            // nested list — simplified: just collect text
-            i++;
-          }
-          items.push({ children: itemInlines, checked, subItems: subItems.length ? subItems : undefined });
-          i++; // skip list_item_close
-        } else {
-          i++;
-        }
-      }
-      const listType = isCheckbox ? "checkbox" : (isOrdered ? "numbered" : "bullet");
-      nodes.push({ type: "bullet_list", items, listType });
-      i++; // skip list close
+      const listResult = parseListTokens(i);
+      const listType = listResult.isCheckbox ? "checkbox" : (t.type === "ordered_list_open" ? "numbered" : "bullet");
+      nodes.push({ type: "bullet_list", items: listResult.items, listType });
+      i = listResult.nextIndex;
       continue;
     }
 

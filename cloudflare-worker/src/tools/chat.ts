@@ -7,16 +7,19 @@ import { z } from "zod";
 import { googleFetch } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import type { GetCredsFunc } from "../types";
+import type {
+  ChatSpaceListResponse, ChatMessageListResponse, ChatMessage, ChatReaction, ChatAttachment,
+} from "./google-api-types";
 
 function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("list_chat_spaces", "List Google Chat spaces the user is in.", {
     page_size: z.number().optional().default(20),
   }, { readOnlyHint: true }, withErrorHandler(async ({ page_size = 20 }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://chat.googleapis.com/v1/spaces?pageSize=${page_size}`, accessToken) as any;
+    const data = await googleFetch(`https://chat.googleapis.com/v1/spaces?pageSize=${page_size}`, accessToken) as ChatSpaceListResponse;
     const spaces = data.spaces || [];
     if (!spaces.length) return { content: [{ type: "text", text: "No Chat spaces found." }] };
-    const lines = spaces.map((s: any) => `- ${s.displayName || s.name} (${s.spaceType || "SPACE"}) | ID: ${s.name}`);
+    const lines = spaces.map(s => `- ${s.displayName || s.name} (${s.spaceType || "SPACE"}) | ID: ${s.name}`);
     return { content: [{ type: "text", text: `Chat Spaces (${spaces.length}):\n${lines.join("\n")}` }] };
   }));
 
@@ -29,10 +32,10 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const params = new URLSearchParams({ pageSize: String(page_size), orderBy: order_by });
     if (filter) params.set("filter", filter);
-    const data = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages?${params}`, accessToken) as any;
-    const messages = order_by === "createTime desc" ? (data.messages || []).reverse() : (data.messages || []);
+    const data = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages?${params}`, accessToken) as ChatMessageListResponse;
+    const messages = data.messages || [];
     if (!messages.length) return { content: [{ type: "text", text: "No messages." }] };
-    const lines = messages.map((m: any) => {
+    const lines = messages.map(m => {
       const sender = m.sender?.displayName || m.sender?.name || "Unknown";
       const text = m.text || "(media/card)";
       const time = m.createTime ? new Date(m.createTime).toLocaleString() : "";
@@ -46,7 +49,7 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
     text: z.string(),
   }, withErrorHandler(async ({ space_name, text }) => {
     const { accessToken } = await getCreds();
-    const result = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages`, accessToken, "POST", { text }) as any;
+    const result = await googleFetch(`https://chat.googleapis.com/v1/${space_name}/messages`, accessToken, "POST", { text }) as ChatMessage;
     return { content: [{ type: "text", text: `Message sent! Message name: ${result.name}` }] };
   }));
 
@@ -61,13 +64,13 @@ function _registerChat(server: McpServer, getCreds: GetCredsFunc) {
     const filters: string[] = [];
     if (create_time_after) filters.push(`createTime > "${create_time_after}"`);
     if (create_time_before) filters.push(`createTime < "${create_time_before}"`);
-    if (space_name) filters.push(`spaces/${space_name.replace(/^spaces\//, "")}`);
+    if (space_name) filters.push(`space = "spaces/${space_name.replace(/^spaces\//, "")}"`);
     const params = new URLSearchParams({ query, pageSize: String(Math.min(page_size, 25)) });
     if (filters.length) params.set("filter", filters.join(" AND "));
-    const data = await googleFetch(`https://chat.googleapis.com/v1/spaces/messages:search?${params}`, accessToken) as any;
+    const data = await googleFetch(`https://chat.googleapis.com/v1/spaces/messages:search?${params}`, accessToken) as ChatMessageListResponse;
     const messages = data.messages || [];
     if (!messages.length) return { content: [{ type: "text", text: `No messages found for: "${query}"` }] };
-    const lines = messages.map((m: any) =>
+    const lines = messages.map(m =>
       `[${m.createTime}] ${m.sender?.displayName || m.sender?.name}: ${m.text || "(media)"}\nSpace: ${m.space?.name || m.name?.split("/messages/")[0] || "?"}`
     );
     return { content: [{ type: "text", text: lines.join("\n\n") }] };
@@ -82,7 +85,7 @@ function _registerChatReactions(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     const result = await googleFetch(`https://chat.googleapis.com/v1/${message_name}/reactions`, accessToken, "POST", {
       emoji: { unicode: emoji }
-    }) as any;
+    }) as ChatReaction;
     return { content: [{ type: "text", text: `Reaction ${emoji} added to message.\nReaction name: ${result.name}` }] };
   }));
 
@@ -90,7 +93,7 @@ function _registerChatReactions(server: McpServer, getCreds: GetCredsFunc) {
     attachment_name: z.string().describe("Attachment resource name, e.g. 'spaces/{space}/messages/{message}/attachments/{attachment}'"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ attachment_name }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://chat.googleapis.com/v1/${attachment_name}`, accessToken) as any;
+    const data = await googleFetch(`https://chat.googleapis.com/v1/${attachment_name}`, accessToken) as ChatAttachment;
     const lines = [
       `Attachment: ${data.name}`, `Filename: ${data.contentName || "N/A"}`,
       `Type: ${data.contentType || "N/A"}`, `Size: ${data.attachmentDataRef?.resourceName || "N/A"}`,

@@ -19,14 +19,15 @@
 
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
-import type { Env } from "../types";
+import type { McpAgent } from "agents/mcp";
+import type { Env, OAuthProps } from "../types";
 import { createDelegatingHandler } from "../auth/google";
 
 interface WorkerConfig {
   /** Short service name, e.g. "mcp-office". Used in /health response. */
   service: string;
-  /** The McpAgent subclass to serve at /mcp. Must have a static .serve() method. */
-  agent: { serve: (path: string, opts: { binding: string }) => unknown };
+  /** The McpAgent subclass to serve at /mcp. */
+  agent: typeof McpAgent<Env, Record<string, never>, OAuthProps>;
   /**
    * Server name registered in google-auth's mcp_servers table.
    * Used to route /delegate/authorize correctly.
@@ -46,15 +47,23 @@ export function createWorker(config: WorkerConfig) {
 
   const router = new Hono<{ Bindings: Env }>();
 
-  router.get("/health", (c) =>
-    c.json({
-      status: "ok",
+  // The agent's token namespace is actually sourced from env.TOKEN_NAMESPACE
+  // (Durable Objects are constructed by the platform, not by this factory, so
+  // `config.namespace` can't be injected into the agent directly). Surface both
+  // here so a mismatch between the wrangler `vars` and this entry point's config
+  // — the exact drift that would silently misroute token storage — shows up in
+  // health checks instead of failing silently.
+  router.get("/health", (c) => {
+    const envNamespace = c.env.TOKEN_NAMESPACE;
+    return c.json({
+      status: envNamespace && envNamespace !== namespace ? "namespace_mismatch" : "ok",
       service,
       version: "1.0.0",
       transport: "websocket-durable-object",
+      namespace: { configured: namespace, env: envNamespace ?? null },
       timestamp: new Date().toISOString(),
-    })
-  );
+    });
+  });
 
   router.get("/.well-known/oauth-protected-resource", (c) => {
     const base = c.env.PUBLIC_BASE_URL;

@@ -4,7 +4,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues, discussions, or pull requests.**
 
-Instead, please email us at **taylor@workspacemcp.com**
+Instead, please email us at **manhtuongdz@gmail.com**
 
 Please include as much of the following information as you can to help us better understand and resolve the issue:
 
@@ -20,24 +20,35 @@ This information will help us triage your report more quickly.
 
 ## Supported Versions
 
-We release patches for security vulnerabilities. Which versions are eligible for receiving such patches depends on the CVSS v3.0 Rating:
+Workspace Lens is a continuously-deployed hosted service (Cloudflare Workers), not a
+versioned package you install — there's no self-hosted release to patch separately.
+Only the currently deployed version of the public MCP service at `office.lens.io.vn`
+is supported; security fixes are deployed as soon as they're merged rather than
+backported to older releases.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.4.x   | :white_check_mark: |
-| < 1.4   | :x:                |
+If you're running your own fork or deployment of this codebase, you are responsible
+for keeping it up to date with upstream fixes.
 
 ## Security Considerations
 
-When using this MCP server, please ensure:
+Workspace Lens stores your Google OAuth tokens on your behalf so you don't have to —
+that's the trade-off of the "no configuration" model. Specifically:
 
-1. Store Google OAuth credentials securely
-2. Never commit credentials to version control
-3. Use environment variables for sensitive configuration
-4. Regularly rotate OAuth refresh tokens
-5. Limit OAuth scopes to only what's necessary
+- **Shared tier**: Google access/refresh tokens are stored server-side in Cloudflare
+  KV, scoped per-user by Google account ID, and never exposed to the client. OAuth
+  is delegated through a centralized auth worker rather than handled per-deployment.
+- **BYOC tier**: if you [register your own Google Cloud OAuth app](https://auth.lens.io.vn/byoc-register),
+  your tokens are stored under your own tenant, isolated from the shared tier's
+  token storage.
+- Only request the OAuth scopes you actually need — the connector already limits
+  scopes per Google service; don't grant broader access than required.
+- If you fork or self-host this codebase, treat `TOKENS_KV` and `OAUTH_KV` as
+  sensitive: never commit credentials, use Wrangler secrets (not `vars`) for
+  `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_AUTH_SERVICE_TOKEN`, and rotate them if
+  ever exposed.
 
-For more information on securing your use of the project, see https://workspacemcp.com/privacy
+For what data is collected and how to request deletion, see the
+[Privacy Policy](https://workspace.lens.io.vn/privacy).
 
 ## Preferred Languages
 
