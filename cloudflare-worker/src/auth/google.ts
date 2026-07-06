@@ -18,6 +18,38 @@ import type { Env, OAuthProps } from "../types";
 
 type HonoEnv = { Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } };
 
+// Dynamic client registration accepts a caller-chosen redirect_uri with no
+// allow-list — reject anything that isn't a well-formed https URL, or a
+// loopback http URL (the standard OAuth "native app" exception, RFC 8252),
+// so a crafted redirect_uri can't be auto-registered and later used to steer
+// an authorization code to an attacker-controlled host.
+function isAcceptableRedirectUri(raw: string): boolean {
+  let u: URL;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:") {
+    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  }
+  return false;
+}
+
+// This value becomes a KV key component for token storage, so an unexpected
+// shape (e.g. empty/undefined/non-string from a malformed upstream response)
+// must not be allowed through — it would otherwise create a shared, guessable
+// key. Deliberately not constrained to Google's usual numeric format: the
+// upstream google-auth service is a separate, independently-versioned
+// component, and rejecting any well-formed non-empty identifier it sends
+// would be more likely to cause a false-positive outage than to catch a bug.
+function isValidGoogleSub(sub: unknown): sub is string {
+  return typeof sub === "string" && sub.length > 0 && !sub.includes(":");
+}
+
+function maskEmail(email: string): string {
+  const [local, domain] = email.split("@");
+  if (!domain) return "***";
+  return `${local.slice(0, 2)}***@${domain}`;
+}
+
 // ─── Delegating Handler — uses google-auth as centralized OAuth ───────────────
 
 /**
@@ -44,6 +76,9 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
 
     // Auto-register MCP client (same pattern as createGoogleHandler)
     if (clientId && redirectUri) {
+      if (!isAcceptableRedirectUri(redirectUri)) {
+        return c.text("Invalid redirect_uri — must be an https URL (or http://localhost for local development).", 400);
+      }
       const existing = await c.env.OAUTH_KV.get(`client:${clientId}`);
       if (!existing) {
         await c.env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify({
@@ -54,7 +89,7 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
           registrationDate: Math.floor(Date.now() / 1000),
           tokenEndpointAuthMethod: "none",
         }));
-        console.log(`[delegate-auth/${serverName}] auto-registered client ${clientId.slice(-20)}`);
+        console.log(`[delegate-auth/${serverName}] auto-registered client ${clientId}`);
       }
     }
 
@@ -116,6 +151,7 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
           "Authorization": `Bearer ${c.env.GOOGLE_AUTH_SERVICE_TOKEN}`,
         },
         body: JSON.stringify({ code: delegateCode }),
+        signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) {
         const body = await res.text();
@@ -129,7 +165,11 @@ export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
     }
 
     const { sub, email } = verifyResult;
-    console.log(`[delegate-auth/${serverName}] verify OK sub=${sub} email=${email}`);
+    if (!isValidGoogleSub(sub) || typeof email !== "string" || !email) {
+      console.error(`[delegate-auth/${serverName}] verify returned malformed identity (missing/invalid sub or email)`);
+      return c.html(errorPage("Auth verification returned an unexpected response. Please try again."), 502);
+    }
+    console.log(`[delegate-auth/${serverName}] verify OK sub=***${sub.slice(-4)} email=${maskEmail(email)}`);
 
     // Complete OAuth: OAuthProvider issues MCP session token to Claude.ai
     const props: OAuthProps = { google_sub: sub, email };

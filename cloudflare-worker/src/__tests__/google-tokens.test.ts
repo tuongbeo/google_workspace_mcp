@@ -300,18 +300,22 @@ describe("google-tokens", () => {
       expect(token).toBe("grace-token");
     });
 
-    it("still applies the grace window even for a permanent (invalid_grant) failure", async () => {
+    it("does NOT apply the grace window for a permanent (invalid_grant) failure — the token is definitively dead", async () => {
       const fetchMock = vi.fn(async () => mockFetchResponse(false, { error: "invalid_grant" }));
       vi.stubGlobal("fetch", fetchMock);
       const rec = record({ access_token: "grace-token-2", expires_at: Math.floor(Date.now() / 1000) - 60 });
       const kv = createMockKV({ "tokens:workspace:sub-1": JSON.stringify(rec) });
 
-      const promise = getValidAccessToken("sub-1", kv as any);
+      // Attach the rejection assertion before advancing fake timers, so the
+      // handler is registered before the promise actually rejects — otherwise
+      // vitest flags it as an unhandled rejection even though it IS awaited below.
+      const assertion = expect(getValidAccessToken("sub-1", kv as any)).rejects.toThrow(/invalid_grant/);
       await vi.runAllTimersAsync();
-      const token = await promise;
-
-      expect(token).toBe("grace-token-2");
-      // The record was still deleted from KV by the permanent-failure path...
+      // Handing back a stale token here would just trade a clear
+      // "re-authenticate" error for a confusing 401 deeper in whatever tool
+      // call triggered this — invalid_grant means there is nothing to
+      // recover, so the error must propagate instead of being masked.
+      await assertion;
       expect(kv.store.has("tokens:workspace:sub-1")).toBe(false);
     });
 

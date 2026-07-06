@@ -98,7 +98,9 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
         stat_label: z.string().optional().describe("Caption below stat"),
         quote_text: z.string().optional().describe("Pull quote text"),
         quote_author: z.string().optional().describe("Quote attribution"),
-      })).min(1),
+        // Caps prevent a single call from building a batchUpdate request large
+        // enough to exceed Slides' request limits or exhaust Worker CPU/memory.
+      })).min(1).max(300),
     },
     { readOnlyHint: false },
     withErrorHandler(async ({ title, presentation_id, theme = "corporate", font_pair = "open_roboto", slides }) => {
@@ -565,6 +567,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     height: z.number().optional().default(2400000),
     object_id: z.string().optional(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ presentation_id, slide_object_id, image_url, x = 457200, y = 457200, width = 3200000, height = 2400000, object_id }) => {
+    if (!/^https?:\/\//i.test(image_url)) throw new Error("image_url must be an http(s) URL.");
     const { accessToken } = await getCreds();
     const imageId = object_id || `image_${Date.now()}`;
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
@@ -580,6 +583,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     image_url: z.string(),
     image_replace_method: z.enum(["CENTER_INSIDE", "CENTER_CROP"]).optional().default("CENTER_INSIDE"),
   }, withErrorHandler(async ({ presentation_id, contains_text, image_url, image_replace_method = "CENTER_INSIDE" }) => {
+    if (!/^https?:\/\//i.test(image_url)) throw new Error("image_url must be an http(s) URL.");
     const { accessToken } = await getCreds();
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [{ replaceAllShapesWithImage: { imageUrl: image_url, imageReplaceMethod: image_replace_method, containsText: { text: contains_text, matchCase: false } } }],

@@ -29,7 +29,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string(),
   }, withErrorHandler(async ({ tasklist_id }) => {
     const { accessToken } = await getCreds();
-    await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken, "DELETE");
+    await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${encodeURIComponent(tasklist_id)}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Task list ${tasklist_id} deleted.` }] };
   }));
 
@@ -37,10 +37,13 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string().optional().default("@default"),
     show_completed: z.boolean().optional().default(false),
     show_hidden: z.boolean().optional().default(false),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id = "@default", show_completed = false, show_hidden = false }) => {
+    page_size: z.number().optional().default(100).describe("Max tasks to return (max 100 per page)"),
+    page_token: z.string().optional(),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id = "@default", show_completed = false, show_hidden = false, page_size = 100, page_token }) => {
     const { accessToken } = await getCreds();
-    const params = new URLSearchParams({ showCompleted: String(show_completed), showHidden: String(show_hidden), maxResults: "100" });
-    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks?${params}`, accessToken) as GTaskListResponse;
+    const params = new URLSearchParams({ showCompleted: String(show_completed), showHidden: String(show_hidden), maxResults: String(Math.min(page_size, 100)) });
+    if (page_token) params.set("pageToken", page_token);
+    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks?${params}`, accessToken) as GTaskListResponse;
     const tasks = data.items || [];
     if (!tasks.length) return { content: [{ type: "text", text: "No tasks found." }] };
     const lines = tasks.map(t => {
@@ -49,6 +52,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
       const notes = t.notes ? ` | ${t.notes.substring(0, 50)}` : "";
       return `${status} ${t.title}${due}${notes} | ID: ${t.id}`;
     });
+    if (data.nextPageToken) lines.push(`\nNext page token: ${data.nextPageToken}`);
     return { content: [{ type: "text", text: `Tasks (${tasks.length}):\n${lines.join("\n")}` }] };
   }));
 
@@ -57,7 +61,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string().optional().default("@default"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ task_id, tasklist_id = "@default" }) => {
     const { accessToken } = await getCreds();
-    const t = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as GTask;
+    const t = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks/${encodeURIComponent(task_id)}`, accessToken) as GTask;
     return { content: [{ type: "text", text: [`Task: ${t.title}`, `Status: ${t.status}`, `Due: ${t.due?.split("T")[0] || "N/A"}`, `Notes: ${t.notes || "N/A"}`, `ID: ${t.id}`].join("\n") }] };
   }));
 
@@ -72,8 +76,10 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     const body: Record<string, unknown> = { title };
     if (notes) body.notes = notes;
     if (due) body.due = due;
-    const params = parent ? `?parent=${parent}` : "";
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks${params}`, accessToken, "POST", body) as GTask;
+    const params = new URLSearchParams();
+    if (parent) params.set("parent", parent);
+    const qs = params.toString();
+    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks${qs ? `?${qs}` : ""}`, accessToken, "POST", body) as GTask;
     return { content: [{ type: "text", text: `Task created: "${result.title}" (ID: ${result.id})` }] };
   }));
 
@@ -86,8 +92,11 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     due: z.string().optional(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ task_id, tasklist_id = "@default", title, status, notes, due }) => {
     const { accessToken } = await getCreds();
-    const existing = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken) as GTask;
-    const body: Record<string, unknown> = { ...existing };
+    const path = `https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks/${encodeURIComponent(task_id)}`;
+    const existing = await googleFetch(path, accessToken) as GTask;
+    // Only carry over server-assigned identity fields, not the full object —
+    // avoids re-sending stale etag/selfLink-adjacent fields as if they were edits.
+    const body: Record<string, unknown> = { id: existing.id, kind: existing.kind, title: existing.title, status: existing.status, notes: existing.notes, due: existing.due };
     if (title) body.title = title;
     if (status) {
       body.status = status;
@@ -95,7 +104,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     }
     if (notes !== undefined) body.notes = notes;
     if (due) body.due = due;
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken, "PUT", body) as GTask;
+    const result = await googleFetch(path, accessToken, "PUT", body) as GTask;
     return { content: [{ type: "text", text: `Task updated: "${result.title}" | Status: ${result.status}` }] };
   }));
 
@@ -104,7 +113,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string().optional().default("@default"),
   }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ task_id, tasklist_id = "@default" }) => {
     const { accessToken } = await getCreds();
-    await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}`, accessToken, "DELETE");
+    await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks/${encodeURIComponent(task_id)}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Task ${task_id} deleted.` }] };
   }));
 
@@ -118,7 +127,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     const params = new URLSearchParams();
     if (parent) params.set("parent", parent);
     if (previous) params.set("previous", previous);
-    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/tasks/${task_id}/move?${params}`, accessToken, "POST") as GTask;
+    const result = await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/tasks/${encodeURIComponent(task_id)}/move?${params}`, accessToken, "POST") as GTask;
     return { content: [{ type: "text", text: `Task moved. Position: ${result.position || "updated"}` }] };
   }));
 
@@ -126,7 +135,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string().optional().default("@default"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ tasklist_id = "@default" }) => {
     const { accessToken } = await getCreds();
-    await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${tasklist_id}/clear`, accessToken, "POST");
+    await googleFetch(`https://tasks.googleapis.com/tasks/v1/lists/${encodeURIComponent(tasklist_id)}/clear`, accessToken, "POST");
     return { content: [{ type: "text", text: `Completed tasks cleared from list ${tasklist_id}.` }] };
   }));
 }
@@ -136,7 +145,7 @@ function _registerTaskListExtra(server: McpServer, getCreds: GetCredsFunc) {
     tasklist_id: z.string(),
   }, { readOnlyHint: true }, withErrorHandler(async ({ tasklist_id }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${tasklist_id}`, accessToken) as GTaskList;
+    const data = await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${encodeURIComponent(tasklist_id)}`, accessToken) as GTaskList;
     return { content: [{ type: "text", text: `Task List: ${data.title}\nID: ${data.id}\nUpdated: ${data.updated || "N/A"}` }] };
   }));
 }

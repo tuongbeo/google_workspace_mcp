@@ -4,10 +4,10 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { sheetsRequest, googleFetch } from "../google";
+import { sheetsRequest, googleFetch, escapeDriveQueryValue } from "../google";
 import { withErrorHandler } from "../utils/tool-handler";
 import { getTheme, hexToSheetsRgb } from "../styles";
-import { executeWriteSheet } from "../sheets-engine/executor";
+import { executeWriteSheet, defuseFormula } from "../sheets-engine/executor";
 import { WriteSheetInput } from "../sheets-engine/types";
 import type { GetCredsFunc } from "../types";
 
@@ -30,7 +30,7 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ max_results = 20, query }) => {
     const { accessToken } = await getCreds();
     let q = "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false";
-    if (query) q += ` and name contains '${query}'`;
+    if (query) q += ` and name contains '${escapeDriveQueryValue(query)}'`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
     const data = await googleFetch(`https://www.googleapis.com/drive/v3/files?${params}`, accessToken) as any;
     const files = data.files || [];
@@ -76,7 +76,8 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     values: z.array(z.array(z.string())).describe("2D array of values"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ spreadsheet_id, range, values }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values }) as any;
+    const safeValues = values.map(row => row.map(v => defuseFormula(v)));
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values: safeValues }) as any;
     return { content: [{ type: "text", text: `Updated ${data.updatedRows} rows, ${data.updatedColumns} cols, ${data.updatedCells} cells.` }] };
   }));
 
@@ -86,7 +87,8 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
     values: z.array(z.array(z.string())),
   }, { readOnlyHint: false }, withErrorHandler(async ({ spreadsheet_id, range, values }) => {
     const { accessToken } = await getCreds();
-    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { range, majorDimension: "ROWS", values }) as any;
+    const safeValues = values.map(row => row.map(v => defuseFormula(v)));
+    const data = await sheetsRequest(accessToken, spreadsheet_id, `/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, "POST", { range, majorDimension: "ROWS", values: safeValues }) as any;
     return { content: [{ type: "text", text: `Appended ${data.updates?.updatedRows || "?"} rows.` }] };
   }));
 
@@ -170,9 +172,9 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
       title: z.string().describe("Spreadsheet title"),
       sheets: z.array(z.object({
         name: z.string().describe("Sheet tab name"),
-        headers: z.array(z.string()).describe("Column header labels"),
-        rows: z.array(z.array(z.string())).describe("Data rows (2D string array)"),
-      })).min(1),
+        headers: z.array(z.string()).max(MAX_SHEET_COLS).describe("Column header labels"),
+        rows: z.array(z.array(z.string())).max(MAX_SHEET_ROWS).describe("Data rows (2D string array)"),
+      })).min(1).max(MAX_SHEETS_PER_CALL),
       theme: z.enum(["corporate", "modern", "warm", "nature", "minimal", "vibrant", "blue", "green", "gray", "orange"]).optional().default("corporate")
         .describe("Color theme: corporate (default), modern, warm, nature, minimal, vibrant. Legacy aliases: blue=corporate, green=nature, gray=minimal, orange=warm"),
       number_format_columns: z.array(z.object({
@@ -208,7 +210,8 @@ function _registerSheetsCore(server: McpServer, getCreds: GetCredsFunc) {
         const numCols = sheet.headers.length;
         const numDataRows = sheet.rows.length;
         const totalRows = numDataRows + 1;
-        const values = [sheet.headers, ...sheet.rows];
+        const safeRows = sheet.rows.map((row: any[]) => row.map(v => typeof v === "string" ? defuseFormula(v) : v));
+        const values = [sheet.headers, ...safeRows];
         const range = `${sheet.name}!A1:${colLetter(numCols-1)}${totalRows}`;
         await sheetsRequest(accessToken, spreadsheetId, `/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, "PUT", { range, majorDimension: "ROWS", values });
         allReqs.push({ repeatCell: {
@@ -821,17 +824,24 @@ const overlayImageSchema = z.object({
   height: z.number().int(),
 });
 
+// Caps prevent a single call from building a batchUpdate request large enough
+// to exceed Google Sheets' request-size limits or exhaust Worker CPU/memory
+// while constructing it — well above any realistic legitimate sheet.
+const MAX_SHEET_ROWS = 10_000;
+const MAX_SHEET_COLS = 200;
+const MAX_SHEETS_PER_CALL = 50;
+
 const sheetDataSchema = z.object({
   name: z.string().describe("Tab name"),
   data: z.object({
-    headers: z.array(z.string()),
-    rows: z.array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()]))),
+    headers: z.array(z.string()).max(MAX_SHEET_COLS),
+    rows: z.array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()]))).max(MAX_SHEET_ROWS),
   }).optional(),
   csv: z.string().optional(),
   markdown_table: z.string().optional(),
   column_groups: z.array(columnGroupSchema).optional(),
-  section_headers: z.array(sectionHeaderSchema).optional(),
-  total_rows: z.array(z.number().int()).optional(),
+  section_headers: z.array(sectionHeaderSchema).max(MAX_SHEET_ROWS).optional(),
+  total_rows: z.array(z.number().int()).max(MAX_SHEET_ROWS).optional(),
   columns: z.record(z.string(), columnConfigSchema).optional(),
   theme: z.enum(["corporate","modern","warm","nature","minimal","vibrant"]).optional(),
   alternating_rows: z.boolean().optional(),
@@ -870,19 +880,19 @@ function _registerWriteGoogleSheet(server: McpServer, getCreds: GetCredsFunc) {
         .describe("Existing spreadsheet ID — provide to update instead of create"),
       sheet_name: z.string().optional()
         .describe("Target tab name. Defaults to 'Sheet1'."),
-      sheets: z.array(sheetDataSchema).optional()
+      sheets: z.array(sheetDataSchema).max(MAX_SHEETS_PER_CALL).optional()
         .describe("Create multiple tabs at once."),
       data: z.object({
-        headers: z.array(z.string()),
-        rows: z.array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()]))),
+        headers: z.array(z.string()).max(MAX_SHEET_COLS),
+        rows: z.array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()]))).max(MAX_SHEET_ROWS),
       }).optional().describe("Structured data with headers + rows array"),
       csv: z.string().optional().describe("Raw CSV string"),
       markdown_table: z.string().optional().describe("Markdown table (| col | col | format)"),
       column_groups: z.array(columnGroupSchema).optional()
         .describe("Merge header cells into labeled groups spanning multiple columns"),
-      section_headers: z.array(sectionHeaderSchema).optional()
+      section_headers: z.array(sectionHeaderSchema).max(MAX_SHEET_ROWS).optional()
         .describe("Insert dark divider rows before specified data rows"),
-      total_rows: z.array(z.number().int()).optional()
+      total_rows: z.array(z.number().int()).max(MAX_SHEET_ROWS).optional()
         .describe("Data row indices (0-based) to style as totals: bold + top border"),
       columns: z.record(z.string(), columnConfigSchema).optional()
         .describe("Per-column config keyed by 0-based index as string. E.g. {'0':{type:'currency'}}"),

@@ -48,7 +48,7 @@ export async function storeTokens(
   await kv.put(tokenKey(namespace, sub), JSON.stringify(record), {
     expirationTtl: KV_TOKEN_TTL,
   });
-  console.log(`[tokens] stored for ns=${namespace} sub=${sub}, expires_in=${expiresIn}s`);
+  console.log(`[tokens] stored for ns=${namespace} sub=***${sub.slice(-4)}, expires_in=${expiresIn}s`);
 }
 
 // ── Refresh with exponential backoff ─────────────────────────────────────────
@@ -62,9 +62,7 @@ async function refreshWithRetry(
   retries = 3,
   namespace = "workspace",
 ): Promise<StoredTokenRecord> {
-  if (!record.refresh_token) {
-    throw new Error(`Cannot refresh: no refresh_token for ns=${namespace} sub=${sub}`);
-  }
+  if (!record.refresh_token) throw new Error(`No refresh token for ns=${namespace} sub=***${sub.slice(-4)}. Re-authenticate.`);
   const refreshToken = record.refresh_token;
   let lastErr: Error = new Error("unknown");
 
@@ -73,16 +71,24 @@ async function refreshWithRetry(
       await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
     }
 
-    const res = await fetch("https://oauth2.googleapis.com/token", {
-      method:  "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type:    "refresh_token",
-        client_id:     googleClientId,
-        client_secret: googleClientSecret,
-        refresh_token: refreshToken,
-      }).toString(),
-    });
+    let res: Response;
+    try {
+      res = await fetch("https://oauth2.googleapis.com/token", {
+        method:  "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type:    "refresh_token",
+          client_id:     googleClientId,
+          client_secret: googleClientSecret,
+          refresh_token: refreshToken,
+        }).toString(),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+      console.warn(`[tokens] refresh network error attempt ${attempt + 1} for ns=${namespace} sub=***${sub.slice(-4)}: ${lastErr.message}`);
+      continue;
+    }
 
     if (res.ok) {
       const t = await res.json() as {
@@ -96,10 +102,24 @@ async function refreshWithRetry(
         google_client_id:     googleClientId,
         google_client_secret: googleClientSecret,
       };
+      // Defend against the lock's TOCTOU window: if another concurrent refresh
+      // already wrote a *newer* record while this one was in flight, keep that
+      // one instead of overwriting it with ours (which may carry a stale
+      // refresh_token if Google rotated it only on the other branch).
+      const current = await kv.get(tokenKey(namespace, sub));
+      if (current) {
+        try {
+          const currentRecord = JSON.parse(current) as StoredTokenRecord;
+          if (currentRecord.expires_at > updated.expires_at) {
+            console.log(`[tokens] refresh race detected for ns=${namespace} sub=***${sub.slice(-4)} — keeping newer concurrent record`);
+            return currentRecord;
+          }
+        } catch { /* fall through and write ours */ }
+      }
       await kv.put(tokenKey(namespace, sub), JSON.stringify(updated), {
         expirationTtl: KV_TOKEN_TTL,
       });
-      console.log(`[tokens] refreshed ns=${namespace} sub=${sub} (attempt ${attempt + 1})`);
+      console.log(`[tokens] refreshed ns=${namespace} sub=***${sub.slice(-4)} (attempt ${attempt + 1})`);
       return updated;
     }
 
@@ -107,10 +127,22 @@ async function refreshWithRetry(
     let errBody: { error?: string } = {};
     try { errBody = JSON.parse(errText); } catch {}
 
-    if (errBody.error === "invalid_grant" || errBody.error === "invalid_client") {
-      console.warn(`[tokens] permanent failure (${errBody.error}) for ns=${namespace} sub=${sub}`);
+    if (errBody.error === "invalid_grant") {
+      // The user genuinely revoked access (or the refresh token is dead) —
+      // there is nothing to recover, so drop the stored record and require
+      // a fresh OAuth grant.
+      console.warn(`[tokens] permanent failure (invalid_grant) for ns=${namespace} sub=***${sub.slice(-4)}`);
       await kv.delete(tokenKey(namespace, sub));
-      throw new Error(`Google token refresh failed permanently: ${errBody.error}`);
+      throw new Error(`Google token refresh failed permanently: invalid_grant`);
+    }
+    if (errBody.error === "invalid_client") {
+      // Likely a misconfigured/rotated client_id or client_secret on *our*
+      // side, not a per-user problem — the user's refresh_token itself may
+      // still be valid at Google. Don't delete their stored record (that
+      // would force every affected user to fully re-authenticate over a
+      // config issue); just surface the error so it can be fixed centrally.
+      console.error(`[tokens] invalid_client refreshing ns=${namespace} sub=***${sub.slice(-4)} — check GOOGLE_OAUTH_CLIENT_ID/SECRET, not deleting stored token`);
+      throw new Error(`Google token refresh failed: invalid_client (check OAuth client configuration)`);
     }
 
     console.warn(`[tokens] transient error (${res.status}) attempt ${attempt + 1}: ${errText}`);
@@ -157,7 +189,7 @@ export async function getValidAccessToken(
   // Refresh locking — avoid concurrent refresh calls
   const lock = lockKey(namespace, sub);
   if (await kv.get(lock)) {
-    console.log(`[tokens] refresh lock active for ns=${namespace} sub=${sub}, using current token`);
+    console.log(`[tokens] refresh lock active for ns=${namespace} sub=***${sub.slice(-4)}, using current token`);
     return record.access_token;
   }
   await kv.put(lock, "1", { expirationTtl: 30 });
@@ -166,15 +198,24 @@ export async function getValidAccessToken(
     const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv, 3, namespace);
     return updated.access_token;
   } catch (err) {
-    // 5-min grace: tool error is better than connector disconnect
+    // Permanent failures mean the stored token is definitively dead (invalid_grant,
+    // already deleted from KV) or our own client credentials are wrong
+    // (invalid_client) — handing back the old access_token in either case would
+    // just trade a clear "re-authenticate" error for a confusing 401 deeper in
+    // whatever tool call triggered this. Only apply the grace window to
+    // transient failures (network blips, Google 5xx) where the old token may
+    // still have a few valid seconds left.
+    const isPermanent = err instanceof Error && /permanently|invalid_client/.test(err.message);
     const staleSecs = Math.floor(Date.now() / 1000) - expiresAtSec;
-    if (staleSecs >= 0 && staleSecs < 300) {
-      console.warn(`[tokens] refresh failed, stale token (${staleSecs}s) for ns=${namespace} sub=${sub}`);
+    if (!isPermanent && staleSecs >= 0 && staleSecs < 300) {
+      console.warn(`[tokens] refresh failed transiently, using stale token (${staleSecs}s past expiry) for ns=${namespace} sub=***${sub.slice(-4)}`);
       return record.access_token;
     }
     throw err;
   } finally {
-    await kv.delete(lock).catch(() => {});
+    await kv.delete(lock).catch((e) => {
+      console.warn(`[tokens] failed to release refresh lock for ns=${namespace} sub=***${sub.slice(-4)}: ${e}`);
+    });
   }
 }
 

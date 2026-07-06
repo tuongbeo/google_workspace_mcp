@@ -59,7 +59,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     calendar_id: z.string().optional().default("primary"),
   }, { readOnlyHint: true }, withErrorHandler(async ({ event_id, calendar_id = "primary" }) => {
     const { accessToken } = await getCreds();
-    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as CalendarEvent;
+    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}`) as CalendarEvent;
     const lines = [
       `Event: ${ev.summary || "(no title)"}`, `ID: ${ev.id}`,
       `Status: ${ev.status}`, `Start: ${ev.start?.dateTime || ev.start?.date}`,
@@ -142,7 +142,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (attendees?.length) patch.attendees = attendees.map(e => ({ email: e }));
     if (color_id) patch.colorId = color_id;
     if (visibility) patch.visibility = visibility;
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "PATCH", patch) as CalendarEvent;
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}?sendUpdates=${send_updates}`, "PATCH", patch) as CalendarEvent;
     return { content: [{ type: "text", text: `Event updated: "${result.summary}"\nLink: ${result.htmlLink}` }] };
   }));
 
@@ -152,7 +152,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all"),
   }, withErrorHandler(async ({ event_id, calendar_id = "primary", send_updates = "all" }) => {
     const { accessToken } = await getCreds();
-    await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}?sendUpdates=${send_updates}`, "DELETE");
+    await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}?sendUpdates=${send_updates}`, "DELETE");
     return { content: [{ type: "text", text: `Event ${event_id} deleted.` }] };
   }));
 
@@ -163,11 +163,11 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     comment: z.string().optional(),
   }, withErrorHandler(async ({ event_id, response, calendar_id = "primary", comment }) => {
     const { accessToken } = await getCreds();
-    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`) as CalendarEvent;
+    const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}`) as CalendarEvent;
     const attendees = (ev.attendees || []).map(a =>
       a.self ? { ...a, responseStatus: response, comment: comment || a.comment } : a
     );
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${event_id}`, "PATCH", { attendees }) as CalendarEvent;
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}`, "PATCH", { attendees }) as CalendarEvent;
     return { content: [{ type: "text", text: `RSVP updated to "${response}" for event: "${result.summary}"` }] };
   }));
 

@@ -162,7 +162,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
     const { accessToken } = await getCreds();
     await docsRequest(accessToken, document_id) as any;
     const exportUrl = `https://docs.google.com/document/d/${document_id}/export?format=pdf`;
-    const resp = await fetch(exportUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const resp = await fetch(exportUrl, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(30_000) });
     if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
     const bytes = await resp.arrayBuffer();
     const sizeKb = Math.round(bytes.byteLength / 1024);
@@ -712,6 +712,9 @@ function _registerDocsAdvancedTools(server: McpServer, getCreds: GetCredsFunc) {
       const location: Record<string, unknown> = { index };
       if (tab_id) location.tabId = tab_id;
 
+      if (image_url && !/^https?:\/\//i.test(image_url)) {
+        return { content: [{ type: "text", text: "Error: image_url must be an http(s) URL." }] };
+      }
       const req: Record<string, unknown> = { location };
       if (image_url) {
         req.uri = image_url;
@@ -1107,8 +1110,10 @@ function _registerWriteGoogleDocTool(server: McpServer, getCreds: GetCredsFunc) 
     "Creates new doc if no document_id. Appends to existing doc if document_id provided. " +
     "Supports multi-tab documents. Theme and font pair control visual styling.",
     {
-      // Content
-      content: z.string().describe("Markdown content with extended syntax"),
+      // Content — capped well below Google Docs' practical single-insertText
+      // request size ceiling so a huge payload fails fast with a clear error
+      // instead of building an oversized request or exhausting Worker memory.
+      content: z.string().max(1_000_000).describe("Markdown content with extended syntax (max 1,000,000 chars)"),
 
       // Styling
       theme: z.enum(["corporate", "modern", "warm", "nature", "minimal", "vibrant"])

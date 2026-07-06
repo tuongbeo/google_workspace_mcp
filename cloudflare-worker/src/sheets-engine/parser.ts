@@ -22,24 +22,32 @@ export function detectVietnamese(headers: string[]): boolean {
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
 
+// Quote-aware CSV parser. Scans the whole input as one stream rather than
+// splitting into lines first, so a quoted field containing an embedded
+// newline (RFC 4180-legal, common when pasting from a spreadsheet export)
+// is kept as a single cell instead of corrupting the row count.
 function parseCSV(csv: string): (string | number | boolean | null)[][] {
+  const text = csv.trim().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const rows: string[][] = [];
-  const lines = csv.trim().split(/\r?\n/);
-  for (const line of lines) {
-    const cells: string[] = [];
-    let cur = "";
-    let inQuote = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
-        else inQuote = !inQuote;
-      } else if (ch === ',' && !inQuote) {
-        cells.push(cur.trim()); cur = "";
-      } else {
-        cur += ch;
-      }
+  let cells: string[] = [];
+  let cur = "";
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuote && text[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (ch === ',' && !inQuote) {
+      cells.push(cur.trim()); cur = "";
+    } else if (ch === '\n' && !inQuote) {
+      cells.push(cur.trim());
+      rows.push(cells);
+      cells = []; cur = "";
+    } else {
+      cur += ch;
     }
+  }
+  if (cur !== "" || cells.length > 0) {
     cells.push(cur.trim());
     rows.push(cells);
   }

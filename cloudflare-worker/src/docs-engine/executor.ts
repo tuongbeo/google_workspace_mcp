@@ -5,6 +5,7 @@
 
 import { docsRequest, googleFetch } from "../google";
 import type { ExecutionPlan, RichElement } from "./types";
+import { isSafeDocUrl } from "./builder";
 
 // ── Pass 1: Text + structure ──────────────────────────────────────────────────
 
@@ -88,6 +89,7 @@ async function insertRichElement(
   switch (el.type) {
     case "image": {
       if (!el.url) { warnings.push("Image missing URL"); return; }
+      if (!isSafeDocUrl(el.url)) { warnings.push(`Image URL rejected (unsupported scheme): ${el.url}`); return; }
       // Check if URL is reachable (skip invalid URLs gracefully)
       const insertReq: Record<string, unknown> = {
         insertInlineImage: {
