@@ -172,6 +172,7 @@ export interface GTaskListsResponse {
 
 export interface GTask {
   id?: string;
+  kind?: string;
   title?: string;
   status?: string;
   due?: string;
@@ -182,6 +183,7 @@ export interface GTask {
 
 export interface GTaskListResponse {
   items?: GTask[];
+  nextPageToken?: string;
 }
 
 // ── Google Custom Search ─────────────────────────────────────────────────────

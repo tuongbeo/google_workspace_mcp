@@ -33,12 +33,15 @@ function isAcceptableRedirectUri(raw: string): boolean {
   return false;
 }
 
-// Google's `sub` claim is a stable numeric user identifier. This value
-// becomes a KV key component for token storage, so an unexpected shape
-// (e.g. empty/undefined from a malformed upstream response) must not be
-// allowed through — it would otherwise create a shared, guessable key.
+// This value becomes a KV key component for token storage, so an unexpected
+// shape (e.g. empty/undefined/non-string from a malformed upstream response)
+// must not be allowed through — it would otherwise create a shared, guessable
+// key. Deliberately not constrained to Google's usual numeric format: the
+// upstream google-auth service is a separate, independently-versioned
+// component, and rejecting any well-formed non-empty identifier it sends
+// would be more likely to cause a false-positive outage than to catch a bug.
 function isValidGoogleSub(sub: unknown): sub is string {
-  return typeof sub === "string" && /^[0-9]+$/.test(sub);
+  return typeof sub === "string" && sub.length > 0 && !sub.includes(":");
 }
 
 function maskEmail(email: string): string {
