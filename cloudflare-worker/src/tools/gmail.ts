@@ -34,6 +34,25 @@ function extractBody(payload: GmailMessagePart | undefined): string {
   return "";
 }
 
+function extractAttachments(payload: GmailMessagePart | undefined): { filename: string; mimeType: string; attachmentId: string; size: number }[] {
+  const out: { filename: string; mimeType: string; attachmentId: string; size: number }[] = [];
+  const walk = (part: GmailMessagePart | undefined) => {
+    if (!part) return;
+    if (part.filename && part.body?.attachmentId) {
+      out.push({ filename: part.filename, mimeType: part.mimeType || "application/octet-stream", attachmentId: part.body.attachmentId, size: part.body.size || 0 });
+    }
+    for (const p of part.parts || []) walk(p);
+  };
+  walk(payload);
+  return out;
+}
+
+function formatAttachments(payload: GmailMessagePart | undefined): string {
+  const atts = extractAttachments(payload);
+  if (!atts.length) return "";
+  return "\nAttachments:\n" + atts.map(a => `  - ${a.filename} (${a.mimeType}, ${a.size}B, attachment_id: ${a.attachmentId})`).join("\n");
+}
+
 function encodeEmail(headers: string, body: string): string {
   const raw = headers + "\r\n" + body;
   return btoa(unescape(encodeURIComponent(raw))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
@@ -83,7 +102,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
       hdrs["references"] && `References: ${hdrs["references"]}`,
       `Labels: ${(data.labelIds || []).join(", ")}`,
     ].filter(Boolean) as string[];
-    return { content: [{ type: "text", text: [...metaLines, "", "--- BODY ---", body || "[No readable content]"].join("\n") }] };
+    return { content: [{ type: "text", text: [...metaLines, "", "--- BODY ---", body || "[No readable content]", formatAttachments(data.payload)].join("\n") }] };
   }));
 
   server.tool("get_gmail_messages_content_batch", "Batch-retrieve full content of multiple Gmail messages.", {
@@ -95,7 +114,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
         const data = await gmailRequest(accessToken, `/messages/${encodeURIComponent(id)}?format=full`) as GmailMessage;
         const hdrs: Record<string, string> = {};
         for (const h of data.payload?.headers || []) hdrs[h.name.toLowerCase()] = h.value;
-        return `=== Message ${id} ===\nSubject: ${hdrs.subject || "(none)"}\nFrom: ${hdrs.from || "?"}\nDate: ${hdrs.date || ""}\n${extractBody(data.payload).substring(0, 500)}`;
+        return `=== Message ${id} ===\nSubject: ${hdrs.subject || "(none)"}\nFrom: ${hdrs.from || "?"}\nDate: ${hdrs.date || ""}\n${extractBody(data.payload).substring(0, 500)}${formatAttachments(data.payload)}`;
       } catch (e) { return `=== Message ${id} === ERROR: ${e}`; }
     }));
     return { content: [{ type: "text", text: results.join("\n\n") }] };
@@ -115,6 +134,8 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
       lines.push(`Subject: ${hdrs.subject || "(none)"}`);
       const body = extractBody(msg.payload);
       if (body) lines.push(body.substring(0, 300).trim());
+      const atts = formatAttachments(msg.payload);
+      if (atts) lines.push(atts.trim());
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -254,7 +275,7 @@ function _registerGmailCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_gmail_attachment", "Download a Gmail message attachment (returns base64 content).", {
     message_id: z.string(),
     attachment_id: z.string(),
-  }, withErrorHandler(async ({ message_id, attachment_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ message_id, attachment_id }) => {
     const { accessToken } = await getCreds();
     const data = await gmailRequest(accessToken, `/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`) as GmailAttachment;
     return { content: [{ type: "text", text: `Attachment size: ${data.size} bytes\nData (base64): ${(data.data || "").substring(0, 200)}...` }] };

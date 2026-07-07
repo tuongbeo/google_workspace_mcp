@@ -320,7 +320,7 @@ export function withTenantRouting(
     const error        = c.req.query("error");
 
     if (error) {
-      return c.html(tenantErrorPage(`Authorization denied: ${error}`), 400);
+      return c.html(tenantErrorPage(`Authorization denied: ${escapeHtml(error)}`), 400);
     }
     if (!delegateCode || !stateId) {
       return c.html(tenantErrorPage("Missing code or state from google-auth."), 400);
@@ -406,6 +406,15 @@ export function withTenantRouting(
       return base.fetch(request, env, ctx);
     },
   };
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function tenantErrorPage(message: string): string {

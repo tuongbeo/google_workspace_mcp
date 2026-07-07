@@ -95,7 +95,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("list_form_responses", "List responses to a Google Form.", {
     form_id: z.string(),
     page_size: z.number().optional().default(10),
-  }, withErrorHandler(async ({ form_id, page_size = 10 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ form_id, page_size = 10 }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses?pageSize=${page_size}`, accessToken) as FormResponseListResponse;
     const responses = data.responses || [];
@@ -110,7 +110,7 @@ function _registerForms(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_form_response", "Get a specific form response with all answers.", {
     form_id: z.string(),
     response_id: z.string(),
-  }, withErrorHandler(async ({ form_id, response_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ form_id, response_id }) => {
     const { accessToken } = await getCreds();
     const r = await googleFetch(`https://forms.googleapis.com/v1/forms/${form_id}/responses/${response_id}`, accessToken) as FormResponse;
     const lines = [`Response ID: ${r.responseId}`, `Submitted: ${r.createTime}`, ""];

@@ -245,7 +245,7 @@ function _registerDriveCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("remove_drive_permission", "Remove a permission from a Drive file.", {
     file_id: z.string(),
     permission_id: z.string(),
-  }, withErrorHandler(async ({ file_id, permission_id }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ file_id, permission_id }) => {
     const { accessToken } = await getCreds();
     await driveRequest(accessToken, `/files/${file_id}/permissions/${permission_id}?supportsAllDrives=true`, "DELETE");
     return { content: [{ type: "text", text: `Permission ${permission_id} removed from ${file_id}.` }] };

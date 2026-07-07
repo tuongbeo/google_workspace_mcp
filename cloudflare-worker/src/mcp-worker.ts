@@ -11,6 +11,7 @@
 
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withSmartDefaults } from "./utils/tool-annotations";
 import type { Env, OAuthProps } from "./types";
 import { makeGetCreds } from "./google-tokens";
 import { registerGmailTools } from "./tools/gmail";
@@ -27,12 +28,12 @@ import { registerAppsScriptTools } from "./tools/appsscript";
 import { registerSearchTools } from "./tools/search";
 
 export class GoogleWorkspaceAgent extends McpAgent<Env, Record<string, never>, OAuthProps> {
-  server = new McpServer({
+  server = withSmartDefaults(new McpServer({
     name:     "mcp-google-workspace",
     version:  "3.0.0",
     category: "Productivity",
     logoUrl:  "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/3840px-Google_%22G%22_logo.svg.png",
-  } as any);
+  } as any));
 
   async init() {
     if (!this.props) throw new Error("GoogleWorkspaceAgent.init() called before OAuth props were set.");

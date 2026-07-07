@@ -27,7 +27,7 @@ function _registerTasksCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("delete_task_list", "Delete a Google Task list.", {
     tasklist_id: z.string(),
-  }, withErrorHandler(async ({ tasklist_id }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ tasklist_id }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`https://tasks.googleapis.com/tasks/v1/users/@me/lists/${encodeURIComponent(tasklist_id)}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Task list ${tasklist_id} deleted.` }] };

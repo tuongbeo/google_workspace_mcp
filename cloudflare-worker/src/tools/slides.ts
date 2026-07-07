@@ -9,8 +9,20 @@ import { withErrorHandler } from "../utils/tool-handler";
 import { THEMES, FONT_PAIRS, deriveSlideTokens } from "../styles";
 import type { GetCredsFunc } from "../types";
 import type {
-  SlidesPresentation, SlidesBatchUpdateResponse, SlidesSlide, SlidesThumbnail,
+  SlidesPresentation, SlidesBatchUpdateResponse, SlidesSlide, SlidesThumbnail, SlidesPageElement,
 } from "./google-api-types";
+
+// Recurses into elementGroup.children — grouped shapes nest their text there,
+// not on the group element itself, so a flat flatMap over shape?.text misses it.
+function extractElementsText(elements: SlidesPageElement[] | undefined): string {
+  return (elements || [])
+    .flatMap(el =>
+      el.elementGroup?.children
+        ? [extractElementsText(el.elementGroup.children)]
+        : (el.shape?.text?.textElements || []).map(te => te.textRun?.content || "")
+    )
+    .join("");
+}
 
 function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_presentation", "Get details and slide content of a Google Slides presentation.", {
@@ -21,7 +33,7 @@ function _registerSlidesCore(server: McpServer, getCreds: GetCredsFunc) {
     const lines = [`# ${data.title}`, `ID: ${presentation_id}`, `Slides: ${data.slides?.length || 0}`, ""];
     for (const slide of (data.slides || [])) {
       const idx = slide.slideNumber || "?";
-      const texts = (slide.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
+      const texts = extractElementsText(slide.pageElements).trim();
       if (texts) lines.push(`[Slide ${idx}] ${texts.substring(0, 200)}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -404,13 +416,13 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_slide_notes", "Read the speaker notes of a specific slide.", {
     presentation_id: z.string(),
     slide_object_id: z.string().describe("Slide object ID (from get_presentation)"),
-  }, withErrorHandler(async ({ presentation_id, slide_object_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ presentation_id, slide_object_id }) => {
     const { accessToken } = await getCreds();
     const data = await slidesRequest(accessToken, presentation_id, "", "GET") as SlidesPresentation;
     const slide = (data.slides || []).find(s => s.objectId === slide_object_id);
     if (!slide) return { content: [{ type: "text", text: `Slide not found: ${slide_object_id}` }] };
     const notes = slide.slideProperties?.notesPage;
-    const notesTexts = (notes?.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
+    const notesTexts = extractElementsText(notes?.pageElements).trim();
     return { content: [{ type: "text", text: notesTexts ? `Speaker notes:\n${notesTexts}` : "No speaker notes on this slide." }] };
   }));
 
@@ -582,7 +594,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     contains_text: z.string().describe("Text to match in shape (e.g. '{{hero_image}}')"),
     image_url: z.string(),
     image_replace_method: z.enum(["CENTER_INSIDE", "CENTER_CROP"]).optional().default("CENTER_INSIDE"),
-  }, withErrorHandler(async ({ presentation_id, contains_text, image_url, image_replace_method = "CENTER_INSIDE" }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ presentation_id, contains_text, image_url, image_replace_method = "CENTER_INSIDE" }) => {
     if (!/^https?:\/\//i.test(image_url)) throw new Error("image_url must be an http(s) URL.");
     const { accessToken } = await getCreds();
     const result = await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
@@ -677,7 +689,7 @@ function _registerSlidesExtended(server: McpServer, getCreds: GetCredsFunc) {
     table_object_id: z.string(),
     row_index: z.number().int().min(0).optional().default(0),
     column_index: z.number().int().min(0),
-  }, withErrorHandler(async ({ presentation_id, table_object_id, row_index = 0, column_index }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ presentation_id, table_object_id, row_index = 0, column_index }) => {
     const { accessToken } = await getCreds();
     await slidesRequest(accessToken, presentation_id, ":batchUpdate", "POST", {
       requests: [{ deleteTableColumn: { tableObjectId: table_object_id, cellLocation: { rowIndex: row_index, columnIndex: column_index } } }],
@@ -1006,7 +1018,7 @@ function _registerSlidesPage(server: McpServer, getCreds: GetCredsFunc) {
   }, { readOnlyHint: true }, withErrorHandler(async ({ presentation_id, page_object_id }) => {
     const { accessToken } = await getCreds();
     const data = await slidesRequest(accessToken, presentation_id, `/pages/${page_object_id}`, "GET") as SlidesSlide;
-    const texts = (data.pageElements || []).flatMap(el => el.shape?.text?.textElements || []).map(te => te.textRun?.content || "").join("").trim();
+    const texts = extractElementsText(data.pageElements).trim();
     const lines = [`Page: ${page_object_id}`, `Type: ${data.pageType || "SLIDE"}`, `Elements: ${data.pageElements?.length || 0}`, "", "Content:", texts || "(no text)"];
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }));

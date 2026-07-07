@@ -87,6 +87,7 @@ export interface CalendarEvent {
   htmlLink?: string;
   hangoutLink?: string;
   organizer?: { email?: string };
+  creator?: { email?: string };
   attendees?: EventAttendee[];
   conferenceData?: { entryPoints?: ConferenceEntryPoint[] };
 }
@@ -207,8 +208,9 @@ export interface CustomSearchEngineInfo {
 // ── Gmail ──────────────────────────────────────────────────────────────────────
 
 export interface GmailMessagePart {
+  filename?: string;
   mimeType?: string;
-  body?: { data?: string };
+  body?: { data?: string; attachmentId?: string; size?: number };
   parts?: GmailMessagePart[];
   headers?: { name: string; value: string }[];
 }
@@ -323,6 +325,7 @@ export interface SlidesPageElement {
     text?: { textElements?: SlidesTextElement[] };
     placeholder?: { type?: string };
   };
+  elementGroup?: { children?: SlidesPageElement[] };
 }
 
 export interface SlidesSlide {

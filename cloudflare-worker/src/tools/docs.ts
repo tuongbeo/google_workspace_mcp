@@ -158,7 +158,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("export_doc_to_pdf", "Export a Google Doc to PDF (returns download URL).", {
     document_id: z.string(),
-  }, withErrorHandler(async ({ document_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
     const { accessToken } = await getCreds();
     await docsRequest(accessToken, document_id) as any;
     const exportUrl = `https://docs.google.com/document/d/${document_id}/export?format=pdf`;
@@ -172,7 +172,7 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("inspect_doc_structure", "Inspect the structural elements of a Google Doc (indices, types). Supports tab_id for multi-tab documents — each tab has its own independent index space starting at 1.", {
     document_id: z.string(),
     tab_id: z.string().optional().describe("Tab ID to inspect. If omitted, inspects the default body. Get tab IDs from get_doc_tabs."),
-  }, withErrorHandler(async ({ document_id, tab_id }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, tab_id }) => {
     const { accessToken } = await getCreds();
     const path = tab_id ? "?includeTabsContent=true" : "";
     const doc = await docsRequest(accessToken, document_id, path) as any;
@@ -211,14 +211,21 @@ function _registerDocsCoreTools(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_document_comments", "List comments on a Google Doc.", {
     document_id: z.string(),
-  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id }) => {
+    page_token: z.string().optional().describe("Token from a previous call to fetch the next page"),
+  }, { readOnlyHint: true }, withErrorHandler(async ({ document_id, page_token }) => {
     const { accessToken } = await getCreds();
-    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments?fields=comments(id,author,content,createdTime,resolved,replies)&pageSize=100`, accessToken) as any;
+    const params = new URLSearchParams({
+      fields: "comments(id,author,content,createdTime,resolved,replies),nextPageToken",
+      pageSize: "100",
+    });
+    if (page_token) params.set("pageToken", page_token);
+    const data = await googleFetch(`https://www.googleapis.com/drive/v3/files/${document_id}/comments?${params}`, accessToken) as any;
     const comments = data.comments || [];
     if (!comments.length) return { content: [{ type: "text", text: "No comments." }] };
     const lines = comments.map((c: any) =>
       `ID: ${c.id}\nAuthor: ${c.author?.displayName}\nContent: ${c.content}\nCreated: ${c.createdTime}\nResolved: ${c.resolved || false}\nReplies: ${c.replies?.length || 0}`
     );
+    if (data.nextPageToken) lines.push(`Next page token: ${data.nextPageToken}`);
     return { content: [{ type: "text", text: lines.join("\n\n---\n\n") }] };
   }));
 
@@ -267,7 +274,7 @@ function _registerDocsExtraTools(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("list_docs_in_folder", "List Google Docs in a specific Drive folder.", {
     folder_id: z.string().describe("Drive folder ID"),
     max_results: z.number().optional().default(20),
-  }, withErrorHandler(async ({ folder_id, max_results = 20 }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ folder_id, max_results = 20 }) => {
     const { accessToken } = await getCreds();
     const q = `mimeType='application/vnd.google-apps.document' and '${folder_id}' in parents and trashed=false`;
     const params = new URLSearchParams({ q, fields: "files(id,name,modifiedTime,webViewLink)", pageSize: String(max_results) });
