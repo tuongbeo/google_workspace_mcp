@@ -131,7 +131,7 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
     deployment_id: z.string(),
     version_number: z.number().optional(),
     description: z.string().optional(),
-  }, withErrorHandler(async ({ script_id, deployment_id, version_number, description }) => {
+  }, { readOnlyHint: false, destructiveHint: false }, withErrorHandler(async ({ script_id, deployment_id, version_number, description }) => {
     const { accessToken } = await getCreds();
     // deployments.update replaces deploymentConfig wholesale, so unspecified
     // fields must be carried over from the existing deployment or they're wiped.
@@ -146,7 +146,7 @@ function _registerAppsScriptCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("delete_script_deployment", "Delete an Apps Script deployment.", {
     script_id: z.string(),
     deployment_id: z.string(),
-  }, withErrorHandler(async ({ script_id, deployment_id }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ script_id, deployment_id }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/deployments/${deployment_id}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Deployment ${deployment_id} deleted.` }] };
@@ -176,7 +176,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("create_script_version", "Create a versioned snapshot of a Google Apps Script project.", {
     script_id: z.string(),
     description: z.string().optional().describe("Version description"),
-  }, withErrorHandler(async ({ script_id, description }) => {
+  }, { readOnlyHint: false, destructiveHint: false }, withErrorHandler(async ({ script_id, description }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = {};
     if (description) body.description = description;
@@ -187,7 +187,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("get_script_version", "Get details of a specific version of a Google Apps Script project.", {
     script_id: z.string(),
     version_number: z.number(),
-  }, withErrorHandler(async ({ script_id, version_number }) => {
+  }, { readOnlyHint: true }, withErrorHandler(async ({ script_id, version_number }) => {
     const { accessToken } = await getCreds();
     const data = await googleFetch(`${SCRIPT_BASE}/projects/${script_id}/versions/${version_number}`, accessToken) as any;
     return { content: [{ type: "text", text: `Version ${data.versionNumber}\nScript ID: ${data.scriptId}\nDescription: ${data.description || "N/A"}\nCreated: ${data.createTime}` }] };
@@ -207,7 +207,7 @@ function _registerAppsScriptExtra(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("delete_script_project", "Delete a Google Apps Script project.", {
     script_id: z.string().describe("Script project ID (Drive file ID)"),
-  }, withErrorHandler(async ({ script_id }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ script_id }) => {
     const { accessToken } = await getCreds();
     await googleFetch(`https://www.googleapis.com/drive/v3/files/${script_id}`, accessToken, "DELETE");
     return { content: [{ type: "text", text: `Script project ${script_id} deleted (moved to Trash).` }] };

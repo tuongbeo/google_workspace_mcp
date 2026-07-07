@@ -25,6 +25,16 @@ function assertResourceName(name: string, pattern: RegExp, description: string):
   if (!pattern.test(name)) throw new Error(`Invalid resource name "${name}" — expected format: ${description}`);
 }
 
+// email/phone accept a single value or an array — People API replaces the
+// *entire* field on write, so passing one string used to silently discard
+// any other emails/phones the contact already had. Accepting an array lets
+// callers (who fetch the existing list first) pass the full desired set.
+const emailOrPhone = z.union([z.string(), z.array(z.string())]);
+function toValueList(v: string | string[] | undefined): { value: string }[] | undefined {
+  if (v === undefined) return undefined;
+  return (Array.isArray(v) ? v : [v]).map(value => ({ value }));
+}
+
 function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("list_contacts", "List Google Contacts.", {
@@ -76,16 +86,16 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
   server.tool("create_contact", "Create a new Google Contact.", {
     first_name: z.string(),
     last_name: z.string().optional(),
-    email: z.string().optional(),
-    phone: z.string().optional(),
+    email: emailOrPhone.optional().describe("One email, or an array to give the contact multiple"),
+    phone: emailOrPhone.optional().describe("One phone number, or an array to give the contact multiple"),
     company: z.string().optional(),
     job_title: z.string().optional(),
     notes: z.string().optional(),
   }, { readOnlyHint: false }, withErrorHandler(async ({ first_name, last_name, email, phone, company, job_title, notes }) => {
     const { accessToken } = await getCreds();
     const body: Record<string, unknown> = { names: [{ givenName: first_name, familyName: last_name || "" }] };
-    if (email) body.emailAddresses = [{ value: email }];
-    if (phone) body.phoneNumbers = [{ value: phone }];
+    const emails = toValueList(email); if (emails) body.emailAddresses = emails;
+    const phones = toValueList(phone); if (phones) body.phoneNumbers = phones;
     if (company || job_title) body.organizations = [{ name: company || "", title: job_title || "" }];
     if (notes) body.biographies = [{ value: notes }];
     const result = await googleFetch(`${PEOPLE_BASE}/people:createContact`, accessToken, "POST", body) as Person;
@@ -96,12 +106,12 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
     resource_name: z.string(),
     first_name: z.string().optional(),
     last_name: z.string().optional(),
-    email: z.string().optional(),
-    phone: z.string().optional(),
+    email: emailOrPhone.optional().describe("Full replacement list — pass ALL emails the contact should have (fetch with get_contact first to preserve existing ones), or a single string to keep just one"),
+    phone: emailOrPhone.optional().describe("Full replacement list — pass ALL phone numbers the contact should have (fetch with get_contact first to preserve existing ones), or a single string to keep just one"),
     company: z.string().optional(),
     job_title: z.string().optional(),
     notes: z.string().optional(),
-  }, withErrorHandler(async ({ resource_name, first_name, last_name, email, phone, company, job_title, notes }) => {
+  }, { readOnlyHint: false, destructiveHint: false }, withErrorHandler(async ({ resource_name, first_name, last_name, email, phone, company, job_title, notes }) => {
     assertResourceName(resource_name, PERSON_RESOURCE_RE, "people/{personId}");
     const { accessToken } = await getCreds();
     const existing = await googleFetch(`${PEOPLE_BASE}/${resource_name}?personFields=${FIELDS}`, accessToken) as Person;
@@ -112,8 +122,8 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
       body.names = [{ ...n, givenName: first_name ?? n.givenName, familyName: last_name ?? n.familyName }];
       updateFields.push("names");
     }
-    if (email !== undefined) { body.emailAddresses = [{ value: email }]; updateFields.push("emailAddresses"); }
-    if (phone !== undefined) { body.phoneNumbers = [{ value: phone }]; updateFields.push("phoneNumbers"); }
+    const emails = toValueList(email); if (emails) { body.emailAddresses = emails; updateFields.push("emailAddresses"); }
+    const phones = toValueList(phone); if (phones) { body.phoneNumbers = phones; updateFields.push("phoneNumbers"); }
     if (company !== undefined || job_title !== undefined) { body.organizations = [{ name: company || "", title: job_title || "" }]; updateFields.push("organizations"); }
     if (notes !== undefined) { body.biographies = [{ value: notes }]; updateFields.push("biographies"); }
     if (!updateFields.length) return { content: [{ type: "text", text: "No fields to update — provide at least one of first_name/last_name/email/phone/company/job_title/notes." }] };
@@ -123,7 +133,7 @@ function _registerContactsCore(server: McpServer, getCreds: GetCredsFunc) {
 
   server.tool("delete_contact", "Delete a Google Contact.", {
     resource_name: z.string(),
-  }, withErrorHandler(async ({ resource_name }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ resource_name }) => {
     assertResourceName(resource_name, PERSON_RESOURCE_RE, "people/{personId}");
     const { accessToken } = await getCreds();
     await googleFetch(`${PEOPLE_BASE}/${resource_name}:deleteContact`, accessToken, "DELETE");
@@ -207,8 +217,8 @@ function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
       resource_name: z.string().optional().describe("Required for update/delete"),
       first_name: z.string().optional(),
       last_name: z.string().optional(),
-      email: z.string().optional(),
-      phone: z.string().optional(),
+      email: emailOrPhone.optional().describe("Single email, or array for multiple"),
+      phone: emailOrPhone.optional().describe("Single phone, or array for multiple"),
       company: z.string().optional(),
     })).describe("List of contacts to process (max 50)"),
   }, { readOnlyHint: false }, withErrorHandler(async ({ action, contacts }) => {
@@ -218,8 +228,8 @@ function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
     if (action === "create") {
       const contacts_body = contacts.slice(0, 50).map(c => {
         const person: Record<string, unknown> = { names: [{ givenName: c.first_name || "", familyName: c.last_name || "" }] };
-        if (c.email) person.emailAddresses = [{ value: c.email }];
-        if (c.phone) person.phoneNumbers = [{ value: c.phone }];
+        const emails = toValueList(c.email); if (emails) person.emailAddresses = emails;
+        const phones = toValueList(c.phone); if (phones) person.phoneNumbers = phones;
         if (c.company) person.organizations = [{ name: c.company }];
         return person;
       });
@@ -240,8 +250,8 @@ function _registerContactsExtra(server: McpServer, getCreds: GetCredsFunc) {
             body.names = [{ ...n, givenName: c.first_name ?? n.givenName, familyName: c.last_name ?? n.familyName }];
             fields.push("names");
           }
-          if (c.email !== undefined) { body.emailAddresses = [{ value: c.email }]; fields.push("emailAddresses"); }
-          if (c.phone !== undefined) { body.phoneNumbers = [{ value: c.phone }]; fields.push("phoneNumbers"); }
+          const emails = toValueList(c.email); if (emails) { body.emailAddresses = emails; fields.push("emailAddresses"); }
+          const phones = toValueList(c.phone); if (phones) { body.phoneNumbers = phones; fields.push("phoneNumbers"); }
           if (c.company !== undefined) { body.organizations = [{ name: c.company }]; fields.push("organizations"); }
           if (!fields.length) return `  ✗ ${c.resource_name}: no fields to update`;
           await googleFetch(`${PEOPLE_BASE}/${c.resource_name}:updateContact?updatePersonFields=${fields.join(",")}`, accessToken, "PATCH", body);

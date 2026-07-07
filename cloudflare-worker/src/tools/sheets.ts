@@ -679,6 +679,60 @@ function _registerSheetsPhase2(server: McpServer, getCreds: GetCredsFunc) {
     }),
   );
 
+  // ── duplicate_sheet ───────────────────────────────────────────────────────────
+
+  server.tool("duplicate_sheet",
+    "Duplicate an existing sheet (tab) within a Spreadsheet, preserving all data, formulas, and formatting.",
+    {
+      spreadsheet_id: z.string(),
+      sheet_id:       z.number().int().describe("ID of the sheet to duplicate (from get_spreadsheet_info)"),
+      new_title:      z.string().optional().describe("Title for the new sheet. Defaults to \"Copy of <original>\""),
+      insert_index:   z.number().int().optional().describe("0-based position for the new sheet. Defaults to right after the source sheet."),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ spreadsheet_id, sheet_id, new_title, insert_index }) => {
+      const { accessToken } = await getCreds();
+      const req: Record<string, unknown> = { sourceSheetId: sheet_id };
+      if (insert_index !== undefined) req.insertSheetIndex = insert_index;
+      if (new_title) req.newSheetName = new_title;
+      const result = await batchUpdate(accessToken, spreadsheet_id, [{ duplicateSheet: req }]) as any;
+      const newSheet = result.replies?.[0]?.duplicateSheet?.properties;
+      return { content: [{ type: "text", text: `Sheet duplicated: "${newSheet?.title}" (sheetId: ${newSheet?.sheetId})` }] };
+    }),
+  );
+
+  // ── manage_sheet_rows ─────────────────────────────────────────────────────────
+
+  server.tool("manage_sheet_rows",
+    "Insert, delete, or move rows or columns within a sheet.",
+    {
+      action:               z.enum(["insert", "delete", "move"]),
+      spreadsheet_id:       z.string(),
+      sheet_id:             z.number().int(),
+      dimension:            z.enum(["ROWS", "COLUMNS"]).optional().default("ROWS"),
+      start_index:          z.number().int().describe("0-based start index (inclusive)"),
+      end_index:            z.number().int().describe("0-based end index (exclusive) — e.g. to affect one row, use start_index=N, end_index=N+1"),
+      destination_index:    z.number().int().optional().describe("Required for action=move: 0-based index to move the range to"),
+      inherit_from_before:  z.boolean().optional().default(true).describe("For action=insert: inherit formatting from the row/column immediately before the insert point (ignored at index 0)"),
+    },
+    { readOnlyHint: false },
+    withErrorHandler(async ({ action, spreadsheet_id, sheet_id, dimension = "ROWS", start_index, end_index, destination_index, inherit_from_before = true }) => {
+      const { accessToken } = await getCreds();
+      const range = { sheetId: sheet_id, dimension, startIndex: start_index, endIndex: end_index };
+      let request: Record<string, unknown>;
+      if (action === "insert") {
+        request = { insertDimension: { range, inheritFromBefore: start_index > 0 && inherit_from_before } };
+      } else if (action === "delete") {
+        request = { deleteDimension: { range } };
+      } else {
+        if (destination_index === undefined) throw new Error("destination_index is required for action=\"move\"");
+        request = { moveDimension: { source: range, destinationIndex: destination_index } };
+      }
+      await batchUpdate(accessToken, spreadsheet_id, [request]);
+      return { content: [{ type: "text", text: `${dimension} ${action} applied on sheet ${sheet_id} [${start_index}-${end_index}]${action === "move" ? ` → ${destination_index}` : ""}.` }] };
+    }),
+  );
+
   // ── add_filter_view ─────────────────────────────────────────────────────────
 
   server.tool("add_filter_view",

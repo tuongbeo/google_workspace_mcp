@@ -65,6 +65,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
       `Status: ${ev.status}`, `Start: ${ev.start?.dateTime || ev.start?.date}`,
       `End: ${ev.end?.dateTime || ev.end?.date}`,
       `Organizer: ${ev.organizer?.email || "N/A"}`,
+      `Creator: ${ev.creator?.email || "N/A"}`,
       `Description: ${ev.description || "N/A"}`, `Location: ${ev.location || "N/A"}`,
       `Link: ${ev.htmlLink || "N/A"}`,
     ];
@@ -90,7 +91,8 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     color_id: z.string().optional().describe("1-11: 1=Lavender,2=Sage,3=Grape,4=Flamingo,5=Banana,6=Tangerine,7=Peacock,8=Graphite,9=Blueberry,10=Basil,11=Tomato"),
     all_day: z.boolean().optional().default(false),
     visibility: z.enum(["default", "public", "private", "confidential"]).optional().describe("Event visibility for attendees"),
-  }, { readOnlyHint: false }, withErrorHandler(async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false, visibility }) => {
+    send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all").describe("Whether to notify attendees"),
+  }, { readOnlyHint: false }, withErrorHandler(async ({ summary, start_time, end_time, calendar_id = "primary", description, location, attendees, add_google_meet, timezone, recurrence, color_id, all_day = false, visibility, send_updates = "all" }) => {
     const { accessToken } = await getCreds();
     const event: Record<string, unknown> = { summary };
     if (all_day) {
@@ -109,8 +111,9 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     if (add_google_meet) {
       event.conferenceData = { createRequest: { requestId: crypto.randomUUID(), conferenceSolutionKey: { type: "hangoutsMeet" } } };
     }
-    const params = add_google_meet ? "?conferenceDataVersion=1" : "";
-    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events${params}`, "POST", event) as CalendarEvent;
+    const params = new URLSearchParams({ sendUpdates: send_updates });
+    if (add_google_meet) params.set("conferenceDataVersion", "1");
+    const result = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events?${params}`, "POST", event) as CalendarEvent;
     let msg = `Event created: "${result.summary}"\nID: ${result.id}\nLink: ${result.htmlLink}`;
     if (add_google_meet && result.conferenceData?.entryPoints) {
       const meet = result.conferenceData.entryPoints.find(e => e.entryPointType === "video");
@@ -150,7 +153,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     event_id: z.string(),
     calendar_id: z.string().optional().default("primary"),
     send_updates: z.enum(["all", "externalOnly", "none"]).optional().default("all"),
-  }, withErrorHandler(async ({ event_id, calendar_id = "primary", send_updates = "all" }) => {
+  }, { readOnlyHint: false, destructiveHint: true }, withErrorHandler(async ({ event_id, calendar_id = "primary", send_updates = "all" }) => {
     const { accessToken } = await getCreds();
     await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}?sendUpdates=${send_updates}`, "DELETE");
     return { content: [{ type: "text", text: `Event ${event_id} deleted.` }] };
@@ -161,7 +164,7 @@ export function registerCalendarTools(server: McpServer, getCreds: GetCredsFunc)
     response: z.enum(["accepted", "declined", "tentative"]),
     calendar_id: z.string().optional().default("primary"),
     comment: z.string().optional(),
-  }, withErrorHandler(async ({ event_id, response, calendar_id = "primary", comment }) => {
+  }, { readOnlyHint: false, destructiveHint: false }, withErrorHandler(async ({ event_id, response, calendar_id = "primary", comment }) => {
     const { accessToken } = await getCreds();
     const ev = await calendarRequest(accessToken, `/calendars/${encodeURIComponent(calendar_id)}/events/${encodeURIComponent(event_id)}`) as CalendarEvent;
     const attendees = (ev.attendees || []).map(a =>

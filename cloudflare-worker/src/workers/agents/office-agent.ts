@@ -12,6 +12,7 @@
 
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withSmartDefaults } from "../../utils/tool-annotations";
 import type { Env, OAuthProps } from "../../types";
 import { makeGetCreds } from "../../google-tokens";
 import { registerDocsTools }       from "../../tools/docs";
@@ -136,10 +137,10 @@ function withSkip(server: McpServer, skip: Set<string>): McpServer {
 // ── Agent ─────────────────────────────────────────────────────────────────────
 
 export class OfficeAgent extends McpAgent<Env, Record<string, never>, OAuthProps> {
-  server = new McpServer({
+  server = withSmartDefaults(new McpServer({
     name:    "mcp-office",
     version: "1.0.0",
-  } as any);
+  } as any));
 
   async init() {
     if (!this.props) throw new Error("OfficeAgent.init() called before OAuth props were set.");
