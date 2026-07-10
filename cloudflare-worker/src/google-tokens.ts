@@ -192,7 +192,8 @@ export async function getValidAccessToken(
     console.log(`[tokens] refresh lock active for ns=${namespace} sub=***${sub.slice(-4)}, using current token`);
     return record.access_token;
   }
-  await kv.put(lock, "1", { expirationTtl: 30 });
+  // Cloudflare KV rejects expirationTtl below 60s.
+  await kv.put(lock, "1", { expirationTtl: 60 });
 
   try {
     const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv, 3, namespace);
