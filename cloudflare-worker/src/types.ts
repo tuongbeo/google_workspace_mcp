@@ -6,7 +6,7 @@
 export type GetCredsFunc = () => Promise<{ accessToken: string }>;
 
 // Props injected into McpAgent by OAuthProvider after Google auth completes.
-// Available as `this.props` inside GoogleWorkspaceAgent.
+// Available as `this.props` inside each McpAgent (e.g. OfficeAgent).
 // Declared as `type` (not `interface`) so it structurally satisfies McpAgent's
 // `Record<string, unknown>` props constraint — interfaces don't get TS's
 // implicit index signature inference that type literals do. The explicit
@@ -18,13 +18,6 @@ export type OAuthProps = {
 };
 
 export interface Env {
-  // ─── Google OAuth 2.0 credentials — NOT read by this worker's code anymore.
-  // Refreshing is centralized in google-auth's POST /delegate/refresh (see
-  // google-tokens.ts); these secrets are kept provisioned, unused, only as an
-  // instant-rollback path. Remove after a stability window. ─────────────────
-  GOOGLE_OAUTH_CLIENT_ID:     string;
-  GOOGLE_OAUTH_CLIENT_SECRET: string;
-
   // ─── Worker config ─────────────────────────────────────────────────────────────
   PUBLIC_BASE_URL: string;
 
@@ -34,7 +27,6 @@ export interface Env {
   CONFIG_KV: KVNamespace;  // Feature flags, config (optional)
 
   // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
-  GW_SERVER:   DurableObjectNamespace;
   MCP_SERVER?: DurableObjectNamespace;  // used by office (and any future self-registered tenant sub-workers)
 
   // ─── Centralized Auth (google-auth.tuongbeo.workers.dev) ─────────────────────
