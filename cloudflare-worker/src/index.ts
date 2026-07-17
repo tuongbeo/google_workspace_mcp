@@ -51,7 +51,7 @@ router.get("/.well-known/oauth-protected-resource", (c) => {
 const oauthProvider = new OAuthProvider({
   apiRoute:                    "/mcp",
   apiHandler:                  GoogleWorkspaceAgent.serve("/mcp", { binding: "GW_SERVER" }),
-  defaultHandler:              createDelegatingHandler("workspace"),
+  defaultHandler:              createDelegatingHandler("office"),
   authorizeEndpoint:           "/authorize",
   tokenEndpoint:               "/token",
   clientRegistrationEndpoint:  "/register",
