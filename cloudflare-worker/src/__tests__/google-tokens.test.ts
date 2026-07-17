@@ -269,6 +269,24 @@ describe("google-tokens", () => {
       expect(kv.store.has("tokens:workspace:sub-1")).toBe(false); // token wiped
     });
 
+    it("does not retry on unauthorized_client — keeps the stored token (may be a config issue, not the user's)", async () => {
+      const fetchMock = vi.fn(async () => mockFetchResponse(false, { error: "unauthorized_client" }));
+      vi.stubGlobal("fetch", fetchMock);
+      // Outside the grace window so the permanent failure actually surfaces.
+      const rec = record({ expires_at: Math.floor(Date.now() / 1000) - 3600 });
+      const kv = createMockKV({ "tokens:workspace:sub-1": JSON.stringify(rec) });
+
+      const assertion = expect(getValidAccessToken("sub-1", kv as any)).rejects.toThrow(/unauthorized_client/);
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no retries for permanent failures
+      // Unlike invalid_grant, the client (not the user's grant) is at fault —
+      // deleting the record would force every affected user to re-authenticate
+      // over what's likely a central OAuth client misconfiguration.
+      expect(kv.store.has("tokens:workspace:sub-1")).toBe(true);
+    });
+
     it("exhausts retries and throws the last transient error when outside the grace window", async () => {
       const fetchMock = vi.fn(async () => mockFetchResponse(false, { error: "server_error" }));
       vi.stubGlobal("fetch", fetchMock);
@@ -317,6 +335,17 @@ describe("google-tokens", () => {
       // recover, so the error must propagate instead of being masked.
       await assertion;
       expect(kv.store.has("tokens:workspace:sub-1")).toBe(false);
+    });
+
+    it("does NOT apply the grace window for a permanent (unauthorized_client) failure — masking it would just delay the same 401", async () => {
+      const fetchMock = vi.fn(async () => mockFetchResponse(false, { error: "unauthorized_client" }));
+      vi.stubGlobal("fetch", fetchMock);
+      const rec = record({ access_token: "grace-token-3", expires_at: Math.floor(Date.now() / 1000) - 60 });
+      const kv = createMockKV({ "tokens:workspace:sub-1": JSON.stringify(rec) });
+
+      const assertion = expect(getValidAccessToken("sub-1", kv as any)).rejects.toThrow(/unauthorized_client/);
+      await vi.runAllTimersAsync();
+      await assertion;
     });
 
     it("rejects once the token has been stale for more than 5 minutes", async () => {

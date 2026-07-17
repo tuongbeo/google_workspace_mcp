@@ -135,14 +135,17 @@ async function refreshWithRetry(
       await kv.delete(tokenKey(namespace, sub));
       throw new Error(`Google token refresh failed permanently: invalid_grant`);
     }
-    if (errBody.error === "invalid_client") {
+    if (errBody.error === "invalid_client" || errBody.error === "unauthorized_client") {
       // Likely a misconfigured/rotated client_id or client_secret on *our*
       // side, not a per-user problem — the user's refresh_token itself may
       // still be valid at Google. Don't delete their stored record (that
       // would force every affected user to fully re-authenticate over a
       // config issue); just surface the error so it can be fixed centrally.
-      console.error(`[tokens] invalid_client refreshing ns=${namespace} sub=***${sub.slice(-4)} — check GOOGLE_OAUTH_CLIENT_ID/SECRET, not deleting stored token`);
-      throw new Error(`Google token refresh failed: invalid_client (check OAuth client configuration)`);
+      // unauthorized_client in particular means the client_id/secret used for
+      // this refresh call doesn't match the one Google issued the refresh_token
+      // to — retrying with the same (wrong) credentials can never succeed.
+      console.error(`[tokens] ${errBody.error} refreshing ns=${namespace} sub=***${sub.slice(-4)} — check GOOGLE_OAUTH_CLIENT_ID/SECRET, not deleting stored token`);
+      throw new Error(`Google token refresh failed: ${errBody.error} (check OAuth client configuration)`);
     }
 
     console.warn(`[tokens] transient error (${res.status}) attempt ${attempt + 1}: ${errText}`);
@@ -206,7 +209,7 @@ export async function getValidAccessToken(
     // whatever tool call triggered this. Only apply the grace window to
     // transient failures (network blips, Google 5xx) where the old token may
     // still have a few valid seconds left.
-    const isPermanent = err instanceof Error && /permanently|invalid_client/.test(err.message);
+    const isPermanent = err instanceof Error && /permanently|invalid_client|unauthorized_client/.test(err.message);
     const staleSecs = Math.floor(Date.now() / 1000) - expiresAtSec;
     if (!isPermanent && staleSecs >= 0 && staleSecs < 300) {
       console.warn(`[tokens] refresh failed transiently, using stale token (${staleSecs}s past expiry) for ns=${namespace} sub=***${sub.slice(-4)}`);
