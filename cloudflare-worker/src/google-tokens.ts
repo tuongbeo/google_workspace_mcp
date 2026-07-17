@@ -1,7 +1,15 @@
 /**
  * Google OAuth token storage & refresh.
- * Manages Google access/refresh tokens in TOKENS_KV.
+ * Reads/writes Google access/refresh tokens in TOKENS_KV.
  * Proxy JWT is now handled by @cloudflare/workers-oauth-provider.
+ *
+ * Refreshing is centralized in google-auth (POST /delegate/refresh) — this
+ * worker holds no Google OAuth client secret. google-auth mints every token
+ * via its own resolveCredentials() (Client A1/B or a per-tenant BYOC client),
+ * so it's the only place that can correctly refresh one; a worker refreshing
+ * with its own separate client_id/secret would be refreshing with a client
+ * Google never issued that refresh_token to, which fails with
+ * unauthorized_client (this is exactly the bug this design fixes).
  */
 
 import type { StoredTokenRecord, GetCredsFunc } from "./types";
@@ -9,9 +17,7 @@ import type { StoredTokenRecord, GetCredsFunc } from "./types";
 // "tokens:" matches google-auth's TOKENS_PREFIX in auth/delegate.ts
 // Key schema: tokens:{namespace}:{sub}  e.g. tokens:office:12345
 const KV_TOKEN_PREFIX   = "tokens:";
-const KV_LOCK_PREFIX    = "lock:refresh:";
-const KV_TOKEN_TTL      = 90 * 24 * 3600; // 90 days
-const REFRESH_THRESHOLD = 10 * 60;         // refresh if < 10 min remaining
+const REFRESH_THRESHOLD = 10 * 60; // ask google-auth to refresh if < 10 min remaining
 
 // ── Key helpers ───────────────────────────────────────────────────────────────
 
@@ -20,148 +26,75 @@ function tokenKey(namespace: string, sub: string): string {
   return `${KV_TOKEN_PREFIX}${namespace}:${sub}`;
 }
 
-/** Canonical KV key for a refresh lock. */
-function lockKey(namespace: string, sub: string): string {
-  return `${KV_LOCK_PREFIX}${namespace}:${sub}`;
-}
+// ── Centralized refresh via google-auth ──────────────────────────────────────
 
-// ── Store tokens after OAuth callback ────────────────────────────────────────
+type DelegateRefreshResult =
+  | { kind: "ok"; accessToken: string; expiresAt: number }
+  | { kind: "reauth_required" | "not_found" }
+  | { kind: "config_error" | "transient" };
 
-export async function storeTokens(
-  sub:                string,
-  accessToken:        string,
-  refreshToken:       string,
-  expiresIn:          number,
-  googleClientId:     string,
-  googleClientSecret: string,
-  kv:                 KVNamespace,
-  namespace = "workspace",
-): Promise<void> {
-  const record: StoredTokenRecord = {
-    access_token:          accessToken,
-    refresh_token:         refreshToken,
-    expires_at:            Math.floor(Date.now() / 1000) + expiresIn,
-    scopes:                "",
-    google_client_id:      googleClientId,
-    google_client_secret:  googleClientSecret,
-  };
-  await kv.put(tokenKey(namespace, sub), JSON.stringify(record), {
-    expirationTtl: KV_TOKEN_TTL,
-  });
-  console.log(`[tokens] stored for ns=${namespace} sub=***${sub.slice(-4)}, expires_in=${expiresIn}s`);
-}
-
-// ── Refresh with exponential backoff ─────────────────────────────────────────
-
-async function refreshWithRetry(
-  record:             StoredTokenRecord,
-  sub:                string,
-  googleClientId:     string,
-  googleClientSecret: string,
-  kv:                 KVNamespace,
-  retries = 3,
-  namespace = "workspace",
-): Promise<StoredTokenRecord> {
-  if (!record.refresh_token) throw new Error(`No refresh token for ns=${namespace} sub=***${sub.slice(-4)}. Re-authenticate.`);
-  const refreshToken = record.refresh_token;
-  let lastErr: Error = new Error("unknown");
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) {
-      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
-    }
-
-    let res: Response;
-    try {
-      res = await fetch("https://oauth2.googleapis.com/token", {
-        method:  "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type:    "refresh_token",
-          client_id:     googleClientId,
-          client_secret: googleClientSecret,
-          refresh_token: refreshToken,
-        }).toString(),
-        signal: AbortSignal.timeout(15_000),
-      });
-    } catch (e) {
-      lastErr = e instanceof Error ? e : new Error(String(e));
-      console.warn(`[tokens] refresh network error attempt ${attempt + 1} for ns=${namespace} sub=***${sub.slice(-4)}: ${lastErr.message}`);
-      continue;
-    }
-
-    if (res.ok) {
-      const t = await res.json() as {
-        access_token: string; expires_in?: number; refresh_token?: string;
-      };
-      const updated: StoredTokenRecord = {
-        access_token:         t.access_token,
-        refresh_token:        t.refresh_token || refreshToken,
-        expires_at:           Math.floor(Date.now() / 1000) + (t.expires_in || 3600),
-        scopes:               record.scopes,
-        google_client_id:     googleClientId,
-        google_client_secret: googleClientSecret,
-      };
-      // Defend against the lock's TOCTOU window: if another concurrent refresh
-      // already wrote a *newer* record while this one was in flight, keep that
-      // one instead of overwriting it with ours (which may carry a stale
-      // refresh_token if Google rotated it only on the other branch).
-      const current = await kv.get(tokenKey(namespace, sub));
-      if (current) {
-        try {
-          const currentRecord = JSON.parse(current) as StoredTokenRecord;
-          if (currentRecord.expires_at > updated.expires_at) {
-            console.log(`[tokens] refresh race detected for ns=${namespace} sub=***${sub.slice(-4)} — keeping newer concurrent record`);
-            return currentRecord;
-          }
-        } catch { /* fall through and write ours */ }
-      }
-      await kv.put(tokenKey(namespace, sub), JSON.stringify(updated), {
-        expirationTtl: KV_TOKEN_TTL,
-      });
-      console.log(`[tokens] refreshed ns=${namespace} sub=***${sub.slice(-4)} (attempt ${attempt + 1})`);
-      return updated;
-    }
-
-    const errText = await res.text();
-    let errBody: { error?: string } = {};
-    try { errBody = JSON.parse(errText); } catch {}
-
-    if (errBody.error === "invalid_grant") {
-      // The user genuinely revoked access (or the refresh token is dead) —
-      // there is nothing to recover, so drop the stored record and require
-      // a fresh OAuth grant.
-      console.warn(`[tokens] permanent failure (invalid_grant) for ns=${namespace} sub=***${sub.slice(-4)}`);
-      await kv.delete(tokenKey(namespace, sub));
-      throw new Error(`Google token refresh failed permanently: invalid_grant`);
-    }
-    if (errBody.error === "invalid_client" || errBody.error === "unauthorized_client") {
-      // Likely a misconfigured/rotated client_id or client_secret on *our*
-      // side, not a per-user problem — the user's refresh_token itself may
-      // still be valid at Google. Don't delete their stored record (that
-      // would force every affected user to fully re-authenticate over a
-      // config issue); just surface the error so it can be fixed centrally.
-      // unauthorized_client in particular means the client_id/secret used for
-      // this refresh call doesn't match the one Google issued the refresh_token
-      // to — retrying with the same (wrong) credentials can never succeed.
-      console.error(`[tokens] ${errBody.error} refreshing ns=${namespace} sub=***${sub.slice(-4)} — check GOOGLE_OAUTH_CLIENT_ID/SECRET, not deleting stored token`);
-      throw new Error(`Google token refresh failed: ${errBody.error} (check OAuth client configuration)`);
-    }
-
-    console.warn(`[tokens] transient error (${res.status}) attempt ${attempt + 1}: ${errText}`);
-    lastErr = new Error(`refresh failed (${res.status}): ${errText}`);
+/**
+ * Calls google-auth's POST /delegate/refresh. Never throws — classifies every
+ * outcome (including network errors and malformed/unreachable responses) so
+ * getValidAccessToken() can decide whether to force re-auth or apply the
+ * stale-token grace window below.
+ */
+async function callDelegateRefresh(
+  namespace:    string,
+  sub:          string,
+  authBaseUrl:  string,
+  serviceToken: string,
+): Promise<DelegateRefreshResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${authBaseUrl}/delegate/refresh`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${serviceToken}` },
+      body:    JSON.stringify({ sub, server_name: namespace }),
+      signal:  AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    console.warn(`[tokens] /delegate/refresh network error for ns=${namespace} sub=***${sub.slice(-4)}: ${e instanceof Error ? e.message : String(e)}`);
+    return { kind: "transient" };
   }
 
-  throw lastErr;
+  // Only trust the response as a structured reply if it actually parses as JSON
+  // with a string `error` field — a not-yet-deployed route, a proxy error page,
+  // or any other malformed body must fall into the transient/grace-window path
+  // below, not be treated as a hard failure.
+  let body: { error?: unknown; access_token?: unknown; expires_at?: unknown };
+  try { body = await res.json(); }
+  catch {
+    console.warn(`[tokens] /delegate/refresh returned a non-JSON response (status ${res.status}) for ns=${namespace} sub=***${sub.slice(-4)}`);
+    return { kind: "transient" };
+  }
+  if (typeof body.error !== "string") {
+    console.warn(`[tokens] /delegate/refresh returned an unexpected body shape (status ${res.status}) for ns=${namespace} sub=***${sub.slice(-4)}`);
+    return { kind: "transient" };
+  }
+
+  if (body.error === "ok" && typeof body.access_token === "string" && typeof body.expires_at === "number") {
+    return { kind: "ok", accessToken: body.access_token, expiresAt: body.expires_at };
+  }
+  if (body.error === "reauth_required" || body.error === "not_found") {
+    return { kind: body.error };
+  }
+  if (body.error === "config_error") {
+    // google-auth's own OAuth client secret is wrong/rotated — not a per-user
+    // problem, and not something retrying here can fix. Surface loudly.
+    console.error(`[tokens] /delegate/refresh config_error for ns=${namespace} sub=***${sub.slice(-4)} — google-auth's OAuth client is misconfigured`);
+    return { kind: "config_error" };
+  }
+  return { kind: "transient" };
 }
 
-// ── Get valid access token (refresh if needed) ────────────────────────────────
+// ── Get valid access token (refresh via google-auth if needed) ──────────────
 
 export async function getValidAccessToken(
-  sub:                   string,
-  kv:                    KVNamespace,
-  fallbackClientId?:     string,
-  fallbackClientSecret?: string,
+  sub:          string,
+  kv:           KVNamespace,
+  authBaseUrl:  string,
+  serviceToken: string,
   namespace = "workspace",
 ): Promise<string> {
   const raw = await kv.get(tokenKey(namespace, sub));
@@ -179,48 +112,30 @@ export async function getValidAccessToken(
   if (expiresAtSec - nowSec >= REFRESH_THRESHOLD) {
     return record.access_token;
   }
-
-  const clientId     = record.google_client_id     || fallbackClientId;
-  const clientSecret = record.google_client_secret || fallbackClientSecret;
-  if (!clientId || !clientSecret) {
-    throw new Error(`No Google credentials for ns=${namespace} sub=${sub}. Re-authenticate.`);
-  }
   if (!record.refresh_token) {
     throw new Error(`No refresh token for ns=${namespace} sub=${sub}. Re-authenticate.`);
   }
 
-  // Refresh locking — avoid concurrent refresh calls
-  const lock = lockKey(namespace, sub);
-  if (await kv.get(lock)) {
-    console.log(`[tokens] refresh lock active for ns=${namespace} sub=***${sub.slice(-4)}, using current token`);
+  const result = await callDelegateRefresh(namespace, sub, authBaseUrl, serviceToken);
+
+  if (result.kind === "ok") return result.accessToken;
+
+  if (result.kind === "reauth_required" || result.kind === "not_found") {
+    throw new Error(`Google token refresh failed permanently (${result.kind}) for ns=${namespace} sub=${sub}. Re-authenticate.`);
+  }
+
+  // config_error / transient — not the user's fault (network blip, Google 5xx,
+  // or an ops-side client misconfiguration on google-auth's end). Only apply the
+  // grace window if the cached token is *already* past expiry and only briefly —
+  // handing back a token past its 5-minute grace period would just trade a clear
+  // "re-authenticate" error for a confusing 401 deeper in whatever tool call
+  // triggered this.
+  const staleSecs = nowSec - expiresAtSec;
+  if (staleSecs >= 0 && staleSecs < 300) {
+    console.warn(`[tokens] refresh failed (${result.kind}), using stale token (${staleSecs}s past expiry) for ns=${namespace} sub=***${sub.slice(-4)}`);
     return record.access_token;
   }
-  // Cloudflare KV rejects expirationTtl below 60s.
-  await kv.put(lock, "1", { expirationTtl: 60 });
-
-  try {
-    const updated = await refreshWithRetry(record, sub, clientId, clientSecret, kv, 3, namespace);
-    return updated.access_token;
-  } catch (err) {
-    // Permanent failures mean the stored token is definitively dead (invalid_grant,
-    // already deleted from KV) or our own client credentials are wrong
-    // (invalid_client) — handing back the old access_token in either case would
-    // just trade a clear "re-authenticate" error for a confusing 401 deeper in
-    // whatever tool call triggered this. Only apply the grace window to
-    // transient failures (network blips, Google 5xx) where the old token may
-    // still have a few valid seconds left.
-    const isPermanent = err instanceof Error && /permanently|invalid_client|unauthorized_client/.test(err.message);
-    const staleSecs = Math.floor(Date.now() / 1000) - expiresAtSec;
-    if (!isPermanent && staleSecs >= 0 && staleSecs < 300) {
-      console.warn(`[tokens] refresh failed transiently, using stale token (${staleSecs}s past expiry) for ns=${namespace} sub=***${sub.slice(-4)}`);
-      return record.access_token;
-    }
-    throw err;
-  } finally {
-    await kv.delete(lock).catch((e) => {
-      console.warn(`[tokens] failed to release refresh lock for ns=${namespace} sub=***${sub.slice(-4)}: ${e}`);
-    });
-  }
+  throw new Error(`Google token refresh failed (${result.kind}) for ns=${namespace} sub=${sub}`);
 }
 
 // ── Agent helper ──────────────────────────────────────────────────────────────
@@ -234,15 +149,15 @@ export async function getValidAccessToken(
  */
 export function makeGetCreds(
   sub:       string,
-  env:       { TOKENS_KV: KVNamespace; GOOGLE_OAUTH_CLIENT_ID: string; GOOGLE_OAUTH_CLIENT_SECRET: string },
+  env:       { TOKENS_KV: KVNamespace; GOOGLE_AUTH_BASE_URL: string; GOOGLE_AUTH_SERVICE_TOKEN: string },
   namespace = "workspace",
 ): GetCredsFunc {
   return async () => ({
     accessToken: await getValidAccessToken(
       sub,
       env.TOKENS_KV,
-      env.GOOGLE_OAUTH_CLIENT_ID,
-      env.GOOGLE_OAUTH_CLIENT_SECRET,
+      env.GOOGLE_AUTH_BASE_URL,
+      env.GOOGLE_AUTH_SERVICE_TOKEN,
       namespace,
     ),
   });

@@ -18,7 +18,10 @@ export type OAuthProps = {
 };
 
 export interface Env {
-  // ─── Google OAuth 2.0 credentials (used for token refresh fallback) ───────────
+  // ─── Google OAuth 2.0 credentials — NOT read by this worker's code anymore.
+  // Refreshing is centralized in google-auth's POST /delegate/refresh (see
+  // google-tokens.ts); these secrets are kept provisioned, unused, only as an
+  // instant-rollback path. Remove after a stability window. ─────────────────
   GOOGLE_OAUTH_CLIENT_ID:     string;
   GOOGLE_OAUTH_CLIENT_SECRET: string;
 
@@ -32,7 +35,7 @@ export interface Env {
 
   // ─── Durable Object (McpAgent) ────────────────────────────────────────────────
   GW_SERVER:   DurableObjectNamespace;
-  MCP_SERVER?: DurableObjectNamespace;  // used by office/plan/social workers
+  MCP_SERVER?: DurableObjectNamespace;  // used by office (and any future self-registered tenant sub-workers)
 
   // ─── Centralized Auth (google-auth.tuongbeo.workers.dev) ─────────────────────
   GOOGLE_AUTH_BASE_URL:      string;  // https://google-auth.tuongbeo.workers.dev
@@ -42,7 +45,7 @@ export interface Env {
   GOOGLE_PSE_API_KEY?:    string;
   GOOGLE_PSE_ENGINE_ID?:  string;
 
-  // ─── Sub-worker config (office/plan/social — set via wrangler `vars`) ─────────
+  // ─── Sub-worker config (office — set via wrangler `vars`) ───────────────────
   // Must match the `namespace` passed to createWorker() in that worker's entry
   // point, and the `tokens:{namespace}:{sub}` KV keys used by google-tokens.ts.
   TOKEN_NAMESPACE?: string;
@@ -58,6 +61,4 @@ export interface StoredTokenRecord {
   email?:        string;   // google-auth stores this
   server_name?:  string;   // google-auth stores this
   updated_at?:   number;   // google-auth stores this
-  google_client_id?:     string;
-  google_client_secret?: string;
 }
