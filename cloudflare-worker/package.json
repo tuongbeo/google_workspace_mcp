@@ -3,9 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:office": "wrangler deploy -c wrangler.office.jsonc",
+    "dev": "wrangler dev -c wrangler.office.jsonc",
+    "deploy": "wrangler deploy -c wrangler.office.jsonc",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
