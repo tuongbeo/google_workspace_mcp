@@ -1,5 +1,6 @@
 /**
- * Shared worker factory — eliminates copy-paste across office/plan/social entry points.
+ * Shared worker factory — eliminates copy-paste across sub-worker entry points
+ * (currently office; any future sub-worker follows the same shape).
  *
  * Each sub-worker only differs in:
  *   - service name (for logging / health)
@@ -30,8 +31,7 @@ interface WorkerConfig {
   agent: typeof McpAgent<Env, Record<string, never>, OAuthProps>;
   /**
    * Server name registered in google-auth's mcp_servers table.
-   * Used to route /delegate/authorize correctly.
-   * e.g. "office" | "plan" | "social"
+   * Used to route /delegate/authorize correctly. e.g. "office"
    */
   serverName: string;
   /** Token storage namespace, e.g. "office". Must match the agent's makeGetCreds call. */

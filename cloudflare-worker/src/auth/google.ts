@@ -2,8 +2,8 @@
  * auth/google.ts — Delegating OAuth Handler
  *
  * Delegates Google authentication to the centralized google-auth worker.
- * Each MCP worker (workspace/office/plan/social) uses this handler —
- * they never talk to Google OAuth directly.
+ * This worker (office, and any self-registered BYOC tenant it serves via
+ * /:tenant/*) uses this handler — it never talks to Google OAuth directly.
  *
  * Flow:
  *   GET /authorize       → redirect to google-auth /delegate/authorize
@@ -62,7 +62,8 @@ function maskEmail(email: string): string {
  *                          → completeAuthorization → issue MCP JWT
  *
  * @param serverName  Server name registered in google-auth's mcp_servers table
- *                    (e.g. "office", "plan", "social", "workspace")
+ *                    (e.g. "office"), or a self-registered tenant slug served
+ *                    by this base worker via /:tenant/*
  */
 export function createDelegatingHandler(serverName: string): Hono<HonoEnv> {
   const app = new Hono<HonoEnv>();
